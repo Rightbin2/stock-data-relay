@@ -23,18 +23,18 @@ for ticker in jp_tickers:
     except Exception as e:
         result["holdings"][ticker] = {"error": str(e)}
 
-# 한국 종목/ETF (종목코드)
+# 한국 종목/ETF (종목코드 확정본)
 kr_tickers = {
     "SK텔레콤": "017670",
     "현대차": "005380",
-    "ACE미국SMR원자력TOP10": "0900XX",   # 실제 코드 확인 필요
-    "RISE미국은행TOP10": "0900XX",       # 실제 코드 확인 필요
-    "PLUS글로벌휴머노이드로봇액티브": "0900XX",  # 실제 코드 확인 필요
-    "SOL미국양자컴퓨팅TOP10": "0900XX",   # 실제 코드 확인 필요
-    "SOL조선TOP3플러스": "0900XX",        # 실제 코드 확인 필요
-    "PLUS태양광ESS": "0900XX",           # 실제 코드 확인 필요
-    "TIGER차이나반도체FACTSET": "0900XX", # 실제 코드 확인 필요
-    "TIGER차이나휴머노이드로봇": "0900XX", # 실제 코드 확인 필요
+    "ACE미국SMR원자력TOP10": "0155M0",
+    "RISE미국은행TOP10": "0013P0",
+    "PLUS글로벌휴머노이드로봇액티브": "0035T0",
+    "SOL미국양자컴퓨팅TOP10": "0023A0",
+    "SOL조선TOP3플러스": "466920",
+    "PLUS태양광ESS": "457990",
+    "TIGER차이나반도체FACTSET": "396520",
+    "TIGER차이나휴머노이드로봇": "0053L0",
 }
 for name, code in kr_tickers.items():
     try:
