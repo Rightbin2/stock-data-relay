@@ -1,7 +1,7 @@
 name: Fetch Stock Data
 on:
   schedule:
-    - cron: '30 21 * * *'   # UTC 21:30 = KST 06:30
+    - cron: '30 22 * * *'   # UTC 22:30 = KST 07:30
   workflow_dispatch:        # Actions 탭에서 수동 실행 버튼도 생김
 
 jobs:
