@@ -8,17 +8,8 @@ def fetch(ticker, period="5d"):
     data = yf.Ticker(ticker).history(period=period)
     data = data.reset_index()
     data["Date"] = data["Date"].astype(str)
-    rows = data[["Date", "Close", "Volume"]].tail(3).to_dict(orient="records")
-    labeled = {}
-    labels = ["latest", "prev", "prev2"]
-    for i, row in enumerate(reversed(rows)):
-        if i < len(labels):
-            labeled[labels[i]] = {
-                "date": row["Date"],
-                "close": row["Close"],
-                "volume": row["Volume"]
-            }
-    return labeled
+    slim = data[["Date", "Close", "Volume"]]
+    return slim.tail(3).to_dict(orient="records")
 
 us_tickers = ["GOOGL", "IBM", "TSLA", "KEYS", "RKLB"]
 jp_tickers = ["1306.T", "1631.T"]
