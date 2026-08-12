@@ -1,8 +1,9 @@
 name: Fetch Stock Data
 on:
   schedule:
-    - cron: '30 22 * * 1-5'   # UTC 월~금만 = KST 화~토 아침만 실행
-  workflow_dispatch:        # Actions 탭에서 수동 실행 버튼도 생김
+    - cron: '50 23 * * 1-5'   # UTC 23:50 = KST 08:50, 월~금만
+  workflow_dispatch:
+
 jobs:
   fetch:
     runs-on: ubuntu-latest
