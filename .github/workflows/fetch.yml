@@ -1,7 +1,7 @@
 name: Fetch Stock Data
 on:
   schedule:
-    - cron: '50 23 * * 1-5'   # UTC 23:50 = KST 08:50, 월~금만
+    - cron: '0 23 * * 1-5'   # UTC 23:00 = KST 08:00, 월~금만
   workflow_dispatch:
 
 jobs:
