@@ -7,6 +7,7 @@ result = {"updated_at": datetime.now().isoformat(), "holdings": {}, "indices": {
 def fetch(ticker, period="5d"):
     t = yf.Ticker(ticker)
     data = t.history(period=period).reset_index()
+    data = data.dropna(subset=["Close"])
     data["Date"] = data["Date"].astype(str)
     rows = data[["Date", "Close", "Volume"]].tail(3).to_dict(orient="records")
     labeled = {}
@@ -18,13 +19,6 @@ def fetch(ticker, period="5d"):
                 "close": row["Close"],
                 "volume": row["Volume"]
             }
-    try:
-        fast = t.fast_info
-        rt_price = fast.get("last_price")
-        if rt_price:
-            labeled["realtime_last_price"] = rt_price
-    except Exception:
-        pass
     return labeled
 
 us_tickers = ["GOOGL", "IBM", "TSLA", "KEYS", "RKLB"]
