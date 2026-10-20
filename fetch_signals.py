@@ -1,5 +1,7 @@
-"""보유종목 신호(이평선/RSI/이격/거래량)와 매크로를 계산해 signals.json으로 저장.
-수량·평단 등 개인 포트폴리오 정보는 포함하지 않음 (공개 저장소용)."""
+"""fetch_signals.py
+보유종목 신호·매크로를 계산해 daily.json(매일, 경량) / weekly.json(토요일 심층)으로 저장.
+- 모든 값은 '장 마감 확정 종가' 기준 (마감 전 미완성 봉 제거)
+- 수량·평단 등 개인 포트폴리오 정보는 포함하지 않음 (공개 저장소용)"""
 import json
 import sys
 import time
@@ -12,9 +14,9 @@ import requests
 import yfinance as yf
 
 # ───────── 종목 설정 ─────────
-KR = {  # 이름: 코드 (코스피/코스닥 자동 판별). None이면 missing에 기록
+KR = {  # 이름: 코드 ('.KS/.KQ' 포함 시 그대로 사용, 없으면 자동 판별)
     "현대백화점": "069960", "후성": "093370", "한화시스템": "272210",
-    "대한광통신": "010170", "한국금융지주": "071050", "현대자동차": "005380",
+    "대한광통신": "010170.KQ", "한국금융지주": "071050", "현대자동차": "005380",
     "삼성전자": "005930", "SK텔레콤": "017670",
     "KODEX 3대농산물선물(H)": "271060", "PLUS 태양광&ESS": "457990",
     "SOL 조선TOP3플러스": "466920", "KODEX 필수소비재": "266410",
@@ -23,8 +25,7 @@ KR = {  # 이름: 코드 (코스피/코스닥 자동 판별). None이면 missing
     "RISE 미국은행TOP10": "0013P0", "SOL 미국양자컴퓨팅TOP10": "0023A0",
     "PLUS 글로벌휴머노이드로봇액티브": "0035T0", "TIGER 차이나휴머노이드로봇": "0053L0",
     "TIGER 코리아원자력": "0091P0", "1Q 미국우주항공테크": "0131V0",
-    "ACE 미국SMR원자력TOP10": "0155M0",
-    "KODEX 2차전지핵심소재10": None,          # TODO: 코드 확인 후 입력
+    "ACE 미국SMR원자력TOP10": "0155M0", "KODEX 2차전지핵심소재10": "461950",
     "TIGER 차이나반도체FACTSET(관심)": "396520",
 }
 US = {
@@ -32,28 +33,35 @@ US = {
     "키사이트": "KEYS", "퀀텀컴퓨팅": "QUBT", "뉴스케일파워": "SMR",
     "로켓랩": "RKLB", "인플렉션": "INFQ", "VanEck Agribusiness": "MOO", "KORU": "KORU",
 }
-MACRO = {  # 이름: (티커, 시장)  시장 None = 24시간 거래 자산
-    "USD/KRW": ("KRW=X", None), "DXY": ("DX-Y.NYB", None), "WTI": ("CL=F", None),
+MACRO = {  # 이름: (티커, 시장)   G = 24시간 자산(뉴욕 17시 기준)
+    "USD/KRW": ("KRW=X", "G"), "DXY": ("DX-Y.NYB", "G"), "WTI": ("CL=F", "G"),
     "VIX": ("^VIX", "US"), "S&P500": ("^GSPC", "US"), "NASDAQ": ("^IXIC", "US"),
     "KOSPI": ("^KS11", "KR"), "KOSDAQ": ("^KQ11", "KR"), "닛케이225": ("^N225", "JP"),
-    "금": ("GC=F", None), "구리": ("HG=F", None),
+    "금": ("GC=F", "G"), "구리": ("HG=F", "G"),
 }
 CLOSE = {"KR": ("Asia/Seoul", 15, 40), "JP": ("Asia/Tokyo", 15, 40),
-         "US": ("America/New_York", 16, 15)}
-FIELDS = ["c", "p", "d1", "d5", "d20", "ma20", "ma60", "ma120", "g20",
-          "rsi", "vx", "al", "st", "lo20", "hi60", "dt"]
+         "US": ("America/New_York", 16, 15), "G": ("America/New_York", 17, 0)}
 TH = dict(day_up=5, day_down=-5, d5=10, d20=20, gap=10, gap_hot=15,
-          streak=3, vol=2.0, bigdrop=-3)   # 경고 기준 (필요시 조정)
+          streak=3, vol=2.0, bigdrop=-3)          # 경고 기준 (필요시 조정)
+FIELDS_W = ["c", "d5", "d20", "ma20", "ma60", "ma120", "g20", "rsi", "vx", "al",
+            "st", "sup", "res", "lo60", "hi60", "lo120", "hi120", "n"]
+
+
+# ───────── 유틸 ─────────
+def num(x):
+    return None if x is None or pd.isna(x) else float(x)
 
 
 def r2(x):
-    return None if x is None or pd.isna(x) else round(float(x), 2)
+    x = num(x)
+    return None if x is None else round(x, 2)
 
 
 def pct(a, b):
-    if a is None or b is None or b == 0 or pd.isna(a) or pd.isna(b):
+    a, b = num(a), num(b)
+    if a is None or b in (None, 0):
         return None
-    return round((float(a) / float(b) - 1) * 100, 2)
+    return round((a / b - 1) * 100, 2)
 
 
 def hist(ticker, retries=2):
@@ -70,6 +78,8 @@ def hist(ticker, retries=2):
 
 
 def hist_kr(code):
+    if "." in code:
+        return hist(code, retries=1)
     for suf in (".KS", ".KQ"):
         df = hist(code + suf, retries=1)
         if df is not None:
@@ -78,38 +88,60 @@ def hist_kr(code):
 
 
 def drop_partial(df, mkt):
-    """장 마감 전 미완성 봉 제거"""
-    if mkt not in CLOSE or df is None or df.empty:
+    """마감 전·미래 날짜 봉 제거 → 확정 종가만 남김"""
+    if df is None or df.empty or mkt not in CLOSE:
         return df
     tz, h, m = CLOSE[mkt]
     now = datetime.now(ZoneInfo(tz))
-    if df.index[-1].date() == now.date() and (now.hour, now.minute) < (h, m):
-        return df.iloc[:-1]
+    while len(df):
+        d = df.index[-1].date()
+        if d > now.date() or (d == now.date() and (now.hour, now.minute) < (h, m)):
+            df = df.iloc[:-1]
+        else:
+            break
     return df
 
 
-def rsi14(c, n=14):
+def sma(c, w, back=0):
+    s = c.iloc[:len(c) - back]
+    return float(s.tail(w).mean()) if len(s) >= w else None
+
+
+def rsi_series(c, n=14):
     d = c.diff()
     up = d.clip(lower=0).ewm(alpha=1 / n, adjust=False).mean()
     dn = (-d.clip(upper=0)).ewm(alpha=1 / n, adjust=False).mean()
-    v = 100 - 100 / (1 + up / dn)
-    return None if len(c) <= n or pd.isna(v.iloc[-1]) else float(v.iloc[-1])
+    return 100 - 100 / (1 + up / dn)
 
 
+def align(p, m20, m60, m120):
+    if None in (m20, m60, m120):
+        return None
+    if p > m20 > m60 > m120:
+        return "정"
+    if p < m20 < m60 < m120:
+        return "역"
+    return "혼"
+
+
+def prior_ext(c, w, fn):
+    s = c.iloc[-1 - w:-1]          # 오늘 제외 직전 w일
+    return round(float(fn(s)), 2) if len(s) >= 10 else None
+
+
+# ───────── 종목 분석 ─────────
 def analyze(df, mkt):
     df = drop_partial(df, mkt)
-    if df is None or len(df) < 2:
+    if df is None or len(df) < 3:
         return None
-    c, v = df["Close"].astype(float), df["Volume"].astype(float)
-    n, last = len(c), float(c.iloc[-1])
+    c = df["Close"].astype(float)
+    v = df["Volume"].astype(float)
+    n = len(c)
+    last, prev = float(c.iloc[-1]), float(c.iloc[-2])
 
-    def ret(k):
-        return pct(last, c.iloc[-1 - k]) if n > k else None
-
-    def ma(w):
-        return float(c.tail(w).mean()) if n >= w else None
-
-    m20, m60, m120 = ma(20), ma(60), ma(120)
+    ma = {w: sma(c, w) for w in (20, 60, 120)}
+    mp = {w: sma(c, w, 1) for w in (20, 60, 120)}
+    rs = rsi_series(c)
     st = 0
     for i in range(n - 1, 0, -1):
         if c.iloc[i] > c.iloc[i - 1]:
@@ -118,19 +150,34 @@ def analyze(df, mkt):
             break
     base = v.iloc[-21:-1].mean() if n >= 21 else None
     vx = float(v.iloc[-1] / base) if base and base > 0 else None
-    al = None
-    if None not in (m20, m60, m120):
-        al = "정" if last > m20 > m60 > m120 else "역" if last < m20 < m60 < m120 else "혼"
+    lo = {w: prior_ext(c, w, min) for w in (20, 60, 120)}
+    hi = {w: prior_ext(c, w, max) for w in (20, 60, 120)}
+    levels = {"20일선": ma[20], "60일선": ma[60], "120일선": ma[120],
+              "20일저점": lo[20], "60일저점": lo[60], "120일저점": lo[120],
+              "20일고점": hi[20], "60일고점": hi[60], "120일고점": hi[120]}
+    below = [(round(x, 2), k) for k, x in levels.items() if x is not None and x < last]
+    above = [(round(x, 2), k) for k, x in levels.items() if x is not None and x > last]
     return {
-        "c": r2(last), "p": r2(c.iloc[-2]), "d1": ret(1), "d5": ret(5), "d20": ret(20),
-        "ma20": r2(m20), "ma60": r2(m60), "ma120": r2(m120), "g20": pct(last, m20),
-        "rsi": r2(rsi14(c)), "vx": r2(vx), "al": al, "st": st,
-        "lo20": r2(c.tail(20).min()), "hi60": r2(c.tail(60).max()),
-        "dt": str(df.index[-1].date()),
+        "c": r2(last), "p": r2(prev), "d1": pct(last, prev),
+        "d5": pct(last, c.iloc[-6]) if n > 5 else None,
+        "d20": pct(last, c.iloc[-21]) if n > 20 else None,
+        "ma20": r2(ma[20]), "ma60": r2(ma[60]), "ma120": r2(ma[120]),
+        "mp20": mp[20], "mp60": mp[60], "mp120": mp[120],
+        "g20": pct(last, ma[20]),
+        "rsi": r2(rs.iloc[-1]), "rsi_prev": r2(rs.iloc[-2]),
+        "vx": r2(vx),
+        "al": align(last, ma[20], ma[60], ma[120]),
+        "al_prev": align(prev, mp[20], mp[60], mp[120]),
+        "st": st,
+        "sup": list(max(below)) if below else None,   # [가격, 레벨명] 없으면 신저가권
+        "res": list(min(above)) if above else None,
+        "lo20p": lo[20], "lo60": lo[60], "hi60": hi[60], "lo120": lo[120], "hi120": hi[120],
+        "n": n, "dt": str(df.index[-1].date()),
     }
 
 
-def flags(m):
+def event_flags(m):
+    """상태가 아니라 '이벤트'만 경고 (매일 같은 경고 반복 방지)"""
     f = []
     d1, d5, d20, g, vx = m["d1"], m["d5"], m["d20"], m["g20"], m["vx"]
     if d1 is not None and d1 >= TH["day_up"]:
@@ -149,30 +196,43 @@ def flags(m):
         f.append("이격+10%↑(#17)")
     if vx and vx >= TH["vol"] and d1 is not None and d1 <= TH["bigdrop"]:
         f.append("거래량급증+하락")
-    if m["rsi"] is not None and m["rsi"] >= 70:
-        f.append("RSI≥70")
-    if m["rsi"] is not None and m["rsi"] <= 30:
-        f.append("RSI≤30")
-    if m["al"] == "역":
-        f.append("역배열")
+    r, rp = m["rsi"], m["rsi_prev"]
+    if r is not None and rp is not None:
+        if r <= 30 < rp:
+            f.append("RSI30↓진입")
+        if r >= 70 > rp:
+            f.append("RSI70↑진입")
+    for w in (20, 60, 120):
+        a, b = m[f"ma{w}"], m[f"mp{w}"]
+        if a is not None and b is not None and m["p"] >= b and m["c"] < a:
+            f.append(f"{w}일선이탈")
+    if m["lo20p"] is not None and m["c"] < m["lo20p"]:
+        f.append("20일저점이탈")
+    if m["al"] == "역" and m["al_prev"] != "역":
+        f.append("역배열진입")
+    if m["al"] == "정" and m["al_prev"] != "정":
+        f.append("정배열진입")
     return f
 
 
+# ───────── 매크로 ─────────
 def chg(c):
     c = c.dropna()
     if len(c) < 2:
-        return None
+        return None, None
     last = float(c.iloc[-1])
-    return [r2(last)] + [pct(last, c.iloc[-1 - k]) if len(c) > k else None for k in (1, 5, 21)]
+    out = [r2(last)] + [pct(last, c.iloc[-1 - k]) if len(c) > k else None for k in (1, 5, 21)]
+    return out, str(c.index[-1].date())
 
 
 def chg_abs(c):
     c = c.dropna()
     if len(c) < 2:
-        return None
+        return None, None
     last = float(c.iloc[-1])
-    return [round(last, 3)] + [round(last - float(c.iloc[-1 - k]), 3) if len(c) > k else None
-                               for k in (1, 5, 21)]
+    out = [round(last, 3)] + [round(last - float(c.iloc[-1 - k]), 3) if len(c) > k else None
+                              for k in (1, 5, 21)]
+    return out, str(c.index[-1].date())
 
 
 def fred(series):
@@ -194,18 +254,21 @@ def by_day(s):
     return s[~s.index.duplicated(keep="last")]
 
 
+def dump(path, obj):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, separators=(",", ":"))
+
+
+# ───────── 메인 ─────────
 def main():
-    stocks, alerts, missing = {}, [], []
+    ms, missing = {}, []
 
     def add(name, df, mkt):
         m = analyze(df, mkt)
         if m is None:
             missing.append(name)
-            return
-        stocks[name] = [m[k] for k in FIELDS]
-        f = flags(m)
-        if f:
-            alerts.append([name, f])
+        else:
+            ms[name] = m
 
     for name, code in KR.items():
         if not code:
@@ -217,36 +280,54 @@ def main():
 
     if len(missing) > 6:
         print("누락 과다:", missing)
-        sys.exit(1)          # 이전 정상 파일을 덮어쓰지 않도록 실패 처리
+        sys.exit(1)          # 이전 정상 파일 유지
 
-    macro = {}
+    macro, dts = {}, {}
     for name, (t, mkt) in MACRO.items():
         df = drop_partial(hist(t), mkt)
-        macro[name] = chg(df["Close"]) if df is not None else None
+        if df is None or df.empty:
+            macro[name] = None
+            continue
+        macro[name], dts[name] = chg(df["Close"])
 
-    krw, jpy = hist("KRW=X"), hist("JPY=X")
+    krw, jpy = drop_partial(hist("KRW=X"), "G"), drop_partial(hist("JPY=X"), "G")
     if krw is not None and jpy is not None:
-        macro["JPY/KRW(100엔)"] = chg((by_day(krw["Close"]) / by_day(jpy["Close"]) * 100).dropna())
+        s = (by_day(krw["Close"]) / by_day(jpy["Close"]) * 100).dropna()
+        macro["JPY/KRW(100엔)"], _ = chg(s)
 
     y10, y2 = fred("DGS10"), fred("DGS2")
     if y10 is not None:
-        macro["미국10Y(%,Δ%p)"] = chg_abs(y10)
+        macro["미국10Y(%,Δ%p)"], dts["UST"] = chg_abs(y10)
     if y2 is not None:
-        macro["미국2Y(%,Δ%p)"] = chg_abs(y2)
+        macro["미국2Y(%,Δ%p)"], _ = chg_abs(y2)
     if y10 is not None and y2 is not None:
-        macro["10Y-2Y(%p)"] = chg_abs((y10 - y2).dropna())
+        macro["10Y-2Y(%p)"], _ = chg_abs((y10 - y2).dropna())
 
-    result = {
-        "generated_kst": datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M"),
-        "fields": FIELDS,
-        "note": "stocks=[c종가,p전일,d1/d5/d20 등락%,ma20/60/120,g20 20일선이격%,rsi,vx 거래량/20일평균,"
-                "al 정/역/혼,st 연속상승일,lo20 20일저점,hi60 60일고점,dt 기준일]. "
-                "macro=[현재,1일,5일,21일] (금리는 Δ%p). null=산출불가",
-        "stocks": stocks, "alerts": alerts, "macro": macro, "missing": missing,
-    }
-    with open("signals.json", "w", encoding="utf-8") as f:
-        json.dump(result, f, ensure_ascii=False, separators=(",", ":"))
-    print("완료", len(stocks), "종목, 누락:", missing)
+    alerts = []
+    for name, m in ms.items():
+        f = event_flags(m)
+        if f:
+            alerts.append([name, f, [m["d5"], m["d20"], m["g20"], m["rsi"], m["vx"], m["sup"], m["res"]]])
+    state = {"종목수": len(ms),
+             "역배열": sum(1 for m in ms.values() if m["al"] == "역"),
+             "RSI≤30": sum(1 for m in ms.values() if m["rsi"] is not None and m["rsi"] <= 30)}
+    asof = {"KR": dts.get("KOSPI"), "JP": dts.get("닛케이225"), "US": dts.get("S&P500"),
+            "FX": dts.get("USD/KRW"), "UST": dts.get("UST")}
+    now_kst = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M")
+
+    dump("daily.json", {
+        "gen_kst": now_kst, "asof_종가기준일": asof,
+        "note": "stocks={이름:[종가,전일종가,전일대비%]}; alerts=[이름,[이벤트],[5일%,20일%,20일선이격%,RSI,거래량배수,지지[가격,레벨],저항[가격,레벨]]]; "
+                "macro=[현재,1일%,5일%,21일%](금리 Δ%p); 모두 장마감 확정종가",
+        "stocks": {k: [m["c"], m["p"], m["d1"]] for k, m in ms.items()},
+        "alerts": alerts, "state": state, "macro": macro, "missing": missing,
+    })
+    dump("weekly.json", {
+        "gen_kst": now_kst, "asof_종가기준일": asof, "fields": FIELDS_W,
+        "note": "sup/res=[가격,레벨명] 없으면 null(지지없음=신저가권 / 저항없음=신고가권), n=사용 가능한 일수",
+        "stocks": {k: [m[f] for f in FIELDS_W] for k, m in ms.items()},
+    })
+    print("완료", len(ms), "종목, 누락:", missing, "알림:", len(alerts))
 
 
 if __name__ == "__main__":
