@@ -19,6 +19,6 @@ jobs:
       - run: |
           git config user.name "github-actions"
           git config user.email "actions@github.com"
-          git add data.json signals.json
+          git add -A
           git commit -m "update data" || echo "no changes"
           git push
