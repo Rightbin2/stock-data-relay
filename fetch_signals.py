@@ -1,5 +1,5 @@
-"""fetch_signals.py (v3) - 장 마감 확정 종가 기준 신호 계산
-daily.json : 매일 읽는 경량 파일 / weekly.json : 토요일 심층 점검용
+"""fetch_signals.py (v4) - 장 마감 확정 종가 기준 신호 계산
+daily.json : 매일 읽는 경량 파일(+역배열·RSI≤30 종목 목록) / weekly.json : 토요일 심층 점검용(+벤치마크)
 수량·평단 등 개인 포트폴리오 정보는 포함하지 않음 (공개 저장소용)"""
 import json
 import sys
@@ -61,10 +61,10 @@ def pct(a, b):
     return rnd((a / b - 1) * 100, 1)
 
 
-def hist(ticker, retries=2):
+def hist(ticker, retries=2, period="9mo"):
     for _ in range(retries + 1):
         try:
-            df = yf.Ticker(ticker).history(period="9mo", auto_adjust=False)
+            df = yf.Ticker(ticker).history(period=period, auto_adjust=False)
             df = df.dropna(subset=["Close"])
             if len(df):
                 return df
@@ -261,6 +261,40 @@ def dump(path, obj):
         json.dump(obj, f, ensure_ascii=False, separators=(",", ":"))
 
 
+def ref_returns(s):
+    """일별 종가 Series → 직전월말·전년말 종가 대비 MTD/YTD(%)"""
+    s = by_day(s.dropna())
+    if len(s) < 2:
+        return None
+    last_d = s.index[-1]
+    out = {"asof": str(last_d.date()), "mtd": None, "ytd": None}
+    for key, cut in (("mtd", pd.Timestamp(last_d.year, last_d.month, 1)),
+                     ("ytd", pd.Timestamp(last_d.year, 1, 1))):
+        prior = s[s.index < cut]
+        if len(prior):
+            out[key] = pct(s.iloc[-1], prior.iloc[-1])
+    return out
+
+
+def bench():
+    """벤치마크 MTD/YTD: KOSPI(원화), S&P500(달러), S&P500(원화환산)"""
+    out = {}
+    try:
+        k = drop_partial(hist("^KS11", period="1y"), "KR")
+        sp = drop_partial(hist("^GSPC", period="1y"), "US")
+        fx = drop_partial(hist("KRW=X", period="1y"), "G")
+        if k is not None and not k.empty:
+            out["KOSPI"] = ref_returns(k["Close"])
+        if sp is not None and not sp.empty:
+            out["S&P500_USD"] = ref_returns(sp["Close"])
+            if fx is not None and not fx.empty:
+                kr = (by_day(sp["Close"]) * by_day(fx["Close"])).dropna()
+                out["S&P500_KRW"] = ref_returns(kr)
+    except Exception as e:
+        print("bench 실패", e)
+    return out
+
+
 # ───────── 메인 ─────────
 def main():
     ms, missing = {}, []
@@ -311,10 +345,12 @@ def main():
         f = event_flags(m)
         if f:
             alerts.append([name, f, [m["d5"], m["d20"], m["g20"], m["rsi"], m["vx"], m["sup"], m["res"]]])
+    rev = [k for k, m in ms.items() if m["al"] == "역"]
+    rsi30 = [k for k, m in ms.items() if m["rsi"] is not None and m["rsi"] <= 30]
     state = {"n": len(ms),
              "정배열": sum(1 for m in ms.values() if m["al"] == "정"),
-             "역배열": sum(1 for m in ms.values() if m["al"] == "역"),
-             "RSI≤30": sum(1 for m in ms.values() if m["rsi"] is not None and m["rsi"] <= 30)}
+             "역배열": len(rev),
+             "RSI≤30": len(rsi30)}
     asof = {"KR": dts.get("KOSPI"), "JP": dts.get("닛케이225"), "US": dts.get("S&P500"),
             "FX": dts.get("USD/KRW"), "UST10": dts.get("UST10"), "FRED": dts.get("FRED")}
     gen = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M")
@@ -322,11 +358,13 @@ def main():
     dump("daily.json", {
         "gen": gen, "asof": asof,
         "stocks": {k: [m["c"], m["p"], m["d1"]] for k, m in ms.items()},
-        "alerts": alerts, "state": state, "macro": macro, "missing": missing,
+        "alerts": alerts, "state": state, "rev": rev, "rsi30": rsi30,
+        "macro": macro, "missing": missing,
     })
     dump("weekly.json", {
         "gen": gen, "asof": asof, "fields": FIELDS_W,
         "stocks": {k: [m[f] for f in FIELDS_W] for k, m in ms.items()},
+        "bench": bench(),
     })
     print("완료", len(ms), "종목, 누락:", missing, "알림:", len(alerts))
 
