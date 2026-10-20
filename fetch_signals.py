@@ -1,7 +1,6 @@
-"""fetch_signals.py
-보유종목 신호·매크로를 계산해 daily.json(매일, 경량) / weekly.json(토요일 심층)으로 저장.
-- 모든 값은 '장 마감 확정 종가' 기준 (마감 전 미완성 봉 제거)
-- 수량·평단 등 개인 포트폴리오 정보는 포함하지 않음 (공개 저장소용)"""
+"""fetch_signals.py (v3) - 장 마감 확정 종가 기준 신호 계산
+daily.json : 매일 읽는 경량 파일 / weekly.json : 토요일 심층 점검용
+수량·평단 등 개인 포트폴리오 정보는 포함하지 않음 (공개 저장소용)"""
 import json
 import sys
 import time
@@ -13,25 +12,20 @@ import pandas as pd
 import requests
 import yfinance as yf
 
-# ───────── 종목 설정 ─────────
-KR = {  # 이름: 코드 ('.KS/.KQ' 포함 시 그대로 사용, 없으면 자동 판별)
+KR = {  # 이름: 코드 ('.KS/.KQ' 포함 시 그대로, 없으면 자동 판별)
     "현대백화점": "069960", "후성": "093370", "한화시스템": "272210",
-    "대한광통신": "010170.KQ", "한국금융지주": "071050", "현대자동차": "005380",
-    "삼성전자": "005930", "SK텔레콤": "017670",
-    "KODEX 3대농산물선물(H)": "271060", "PLUS 태양광&ESS": "457990",
-    "SOL 조선TOP3플러스": "466920", "KODEX 필수소비재": "266410",
-    "HANARO e커머스": "322400", "PLUS 우주항공": "421320",
-    "KODEX 미국AI전력핵심인프라": "487230", "TIGER 조선TOP10": "494670",
-    "RISE 미국은행TOP10": "0013P0", "SOL 미국양자컴퓨팅TOP10": "0023A0",
-    "PLUS 글로벌휴머노이드로봇액티브": "0035T0", "TIGER 차이나휴머노이드로봇": "0053L0",
-    "TIGER 코리아원자력": "0091P0", "1Q 미국우주항공테크": "0131V0",
-    "ACE 미국SMR원자력TOP10": "0155M0", "KODEX 2차전지핵심소재10": "461950",
-    "TIGER 차이나반도체FACTSET(관심)": "396520",
+    "대한광통신": "010170.KQ", "한국금융지주": "071050", "현대차": "005380",
+    "삼성전자": "005930", "SKT": "017670", "농산물H": "271060", "태양광ESS": "457990",
+    "조선TOP3+": "466920", "필수소비재": "266410", "e커머스": "322400",
+    "우주항공": "421320", "미국AI전력": "487230", "조선TOP10": "494670",
+    "미국은행": "0013P0", "양자컴퓨팅": "0023A0", "휴머노이드": "0035T0",
+    "차이나로봇": "0053L0", "코리아원자력": "0091P0", "미국우주항공": "0131V0",
+    "SMR원자력": "0155M0", "2차전지소재": "461950", "차이나반도체(관심)": "396520",
 }
 US = {
-    "알파벳": "GOOGL", "IBM": "IBM", "타이슨푸드": "TSN", "테슬라": "TSLA",
-    "키사이트": "KEYS", "퀀텀컴퓨팅": "QUBT", "뉴스케일파워": "SMR",
-    "로켓랩": "RKLB", "인플렉션": "INFQ", "VanEck Agribusiness": "MOO", "KORU": "KORU",
+    "알파벳": "GOOGL", "IBM": "IBM", "타이슨": "TSN", "테슬라": "TSLA",
+    "키사이트": "KEYS", "퀀텀컴": "QUBT", "뉴스케일": "SMR", "로켓랩": "RKLB",
+    "인플렉션": "INFQ", "MOO": "MOO", "KORU": "KORU",
 }
 MACRO = {  # 이름: (티커, 시장)   G = 24시간 자산(뉴욕 17시 기준)
     "USD/KRW": ("KRW=X", "G"), "DXY": ("DX-Y.NYB", "G"), "WTI": ("CL=F", "G"),
@@ -52,16 +46,19 @@ def num(x):
     return None if x is None or pd.isna(x) else float(x)
 
 
-def r2(x):
+def rnd(x, nd=2):
     x = num(x)
-    return None if x is None else round(x, 2)
+    if x is None:
+        return None
+    v = round(x, nd)
+    return int(v) if v == int(v) else v
 
 
 def pct(a, b):
     a, b = num(a), num(b)
     if a is None or b in (None, 0):
         return None
-    return round((a / b - 1) * 100, 2)
+    return rnd((a / b - 1) * 100, 1)
 
 
 def hist(ticker, retries=2):
@@ -126,7 +123,7 @@ def align(p, m20, m60, m120):
 
 def prior_ext(c, w, fn):
     s = c.iloc[-1 - w:-1]          # 오늘 제외 직전 w일
-    return round(float(fn(s)), 2) if len(s) >= 10 else None
+    return rnd(fn(s)) if len(s) >= 10 else None
 
 
 # ───────── 종목 분석 ─────────
@@ -155,21 +152,21 @@ def analyze(df, mkt):
     levels = {"20일선": ma[20], "60일선": ma[60], "120일선": ma[120],
               "20일저점": lo[20], "60일저점": lo[60], "120일저점": lo[120],
               "20일고점": hi[20], "60일고점": hi[60], "120일고점": hi[120]}
-    below = [(round(x, 2), k) for k, x in levels.items() if x is not None and x < last]
-    above = [(round(x, 2), k) for k, x in levels.items() if x is not None and x > last]
+    below = [(rnd(x), k) for k, x in levels.items() if x is not None and x < last]
+    above = [(rnd(x), k) for k, x in levels.items() if x is not None and x > last]
     return {
-        "c": r2(last), "p": r2(prev), "d1": pct(last, prev),
+        "c": rnd(last), "p": rnd(prev), "d1": pct(last, prev),
         "d5": pct(last, c.iloc[-6]) if n > 5 else None,
         "d20": pct(last, c.iloc[-21]) if n > 20 else None,
-        "ma20": r2(ma[20]), "ma60": r2(ma[60]), "ma120": r2(ma[120]),
+        "ma20": rnd(ma[20]), "ma60": rnd(ma[60]), "ma120": rnd(ma[120]),
         "mp20": mp[20], "mp60": mp[60], "mp120": mp[120],
         "g20": pct(last, ma[20]),
-        "rsi": r2(rs.iloc[-1]), "rsi_prev": r2(rs.iloc[-2]),
-        "vx": r2(vx),
+        "rsi": rnd(rs.iloc[-1], 1), "rsi_prev": rnd(rs.iloc[-2], 1),
+        "vx": rnd(vx, 1),
         "al": align(last, ma[20], ma[60], ma[120]),
         "al_prev": align(prev, mp[20], mp[60], mp[120]),
         "st": st,
-        "sup": list(max(below)) if below else None,   # [가격, 레벨명] 없으면 신저가권
+        "sup": list(max(below)) if below else None,   # [가격, 레벨명], None=지지없음(신저가권)
         "res": list(min(above)) if above else None,
         "lo20p": lo[20], "lo60": lo[60], "hi60": hi[60], "lo120": lo[120], "hi120": hi[120],
         "n": n, "dt": str(df.index[-1].date()),
@@ -206,7 +203,12 @@ def event_flags(m):
         a, b = m[f"ma{w}"], m[f"mp{w}"]
         if a is not None and b is not None and m["p"] >= b and m["c"] < a:
             f.append(f"{w}일선이탈")
-    if m["lo20p"] is not None and m["c"] < m["lo20p"]:
+    # 저점 이탈은 가장 심각한 것 하나만
+    if m["n"] > 120 and m["lo120"] is not None and m["c"] < m["lo120"]:
+        f.append("120일저점이탈(신저가권)")
+    elif m["n"] > 60 and m["lo60"] is not None and m["c"] < m["lo60"]:
+        f.append("60일저점이탈")
+    elif m["lo20p"] is not None and m["c"] < m["lo20p"]:
         f.append("20일저점이탈")
     if m["al"] == "역" and m["al_prev"] != "역":
         f.append("역배열진입")
@@ -221,7 +223,7 @@ def chg(c):
     if len(c) < 2:
         return None, None
     last = float(c.iloc[-1])
-    out = [r2(last)] + [pct(last, c.iloc[-1 - k]) if len(c) > k else None for k in (1, 5, 21)]
+    out = [rnd(last)] + [pct(last, c.iloc[-1 - k]) if len(c) > k else None for k in (1, 5, 21)]
     return out, str(c.index[-1].date())
 
 
@@ -230,8 +232,8 @@ def chg_abs(c):
     if len(c) < 2:
         return None, None
     last = float(c.iloc[-1])
-    out = [round(last, 3)] + [round(last - float(c.iloc[-1 - k]), 3) if len(c) > k else None
-                              for k in (1, 5, 21)]
+    out = [rnd(last)] + [rnd(last - float(c.iloc[-1 - k])) if len(c) > k else None
+                         for k in (1, 5, 21)]
     return out, str(c.index[-1].date())
 
 
@@ -271,9 +273,6 @@ def main():
             ms[name] = m
 
     for name, code in KR.items():
-        if not code:
-            missing.append(f"{name}(코드 미입력)")
-            continue
         add(name, hist_kr(code), "KR")
     for name, t in US.items():
         add(name, hist(t), "US")
@@ -295,36 +294,38 @@ def main():
         s = (by_day(krw["Close"]) / by_day(jpy["Close"]) * 100).dropna()
         macro["JPY/KRW(100엔)"], _ = chg(s)
 
-    y10, y2 = fred("DGS10"), fred("DGS2")
-    if y10 is not None:
-        macro["미국10Y(%,Δ%p)"], dts["UST"] = chg_abs(y10)
+    t10 = drop_partial(hist("^TNX"), "G")           # 10Y: 당일 종가
+    if t10 is not None and not t10.empty:
+        s = t10["Close"].astype(float)
+        if s.iloc[-1] > 20:                          # 구버전 ×10 표기 방어
+            s = s / 10
+        macro["미국10Y"], dts["UST10"] = chg_abs(s)
+    y10, y2 = fred("DGS10"), fred("DGS2")            # 2Y·스프레드: FRED(지연 가능)
     if y2 is not None:
-        macro["미국2Y(%,Δ%p)"], _ = chg_abs(y2)
+        macro["미국2Y(FRED)"], dts["FRED"] = chg_abs(y2)
     if y10 is not None and y2 is not None:
-        macro["10Y-2Y(%p)"], _ = chg_abs((y10 - y2).dropna())
+        macro["10Y-2Y(FRED)"], _ = chg_abs((y10 - y2).dropna())
 
     alerts = []
     for name, m in ms.items():
         f = event_flags(m)
         if f:
             alerts.append([name, f, [m["d5"], m["d20"], m["g20"], m["rsi"], m["vx"], m["sup"], m["res"]]])
-    state = {"종목수": len(ms),
+    state = {"n": len(ms),
+             "정배열": sum(1 for m in ms.values() if m["al"] == "정"),
              "역배열": sum(1 for m in ms.values() if m["al"] == "역"),
              "RSI≤30": sum(1 for m in ms.values() if m["rsi"] is not None and m["rsi"] <= 30)}
     asof = {"KR": dts.get("KOSPI"), "JP": dts.get("닛케이225"), "US": dts.get("S&P500"),
-            "FX": dts.get("USD/KRW"), "UST": dts.get("UST")}
-    now_kst = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M")
+            "FX": dts.get("USD/KRW"), "UST10": dts.get("UST10"), "FRED": dts.get("FRED")}
+    gen = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M")
 
     dump("daily.json", {
-        "gen_kst": now_kst, "asof_종가기준일": asof,
-        "note": "stocks={이름:[종가,전일종가,전일대비%]}; alerts=[이름,[이벤트],[5일%,20일%,20일선이격%,RSI,거래량배수,지지[가격,레벨],저항[가격,레벨]]]; "
-                "macro=[현재,1일%,5일%,21일%](금리 Δ%p); 모두 장마감 확정종가",
+        "gen": gen, "asof": asof,
         "stocks": {k: [m["c"], m["p"], m["d1"]] for k, m in ms.items()},
         "alerts": alerts, "state": state, "macro": macro, "missing": missing,
     })
     dump("weekly.json", {
-        "gen_kst": now_kst, "asof_종가기준일": asof, "fields": FIELDS_W,
-        "note": "sup/res=[가격,레벨명] 없으면 null(지지없음=신저가권 / 저항없음=신고가권), n=사용 가능한 일수",
+        "gen": gen, "asof": asof, "fields": FIELDS_W,
         "stocks": {k: [m[f] for f in FIELDS_W] for k, m in ms.items()},
     })
     print("완료", len(ms), "종목, 누락:", missing, "알림:", len(alerts))
