@@ -1,5 +1,5 @@
-"""fetch_signals.py (v4) - 장 마감 확정 종가 기준 신호 계산
-daily.json : 매일 읽는 경량 파일(+역배열·RSI≤30 종목 목록) / weekly.json : 토요일 심층 점검용(+벤치마크)
+"""fetch_signals.py (v5) - 장 마감 확정 종가 기준 신호 계산
+daily.json : 매일 읽는 경량 파일(+역배열·RSI≤30 종목 목록, 지수 지연 시 ETF 대용 추정) / weekly.json : 토요일 심층 점검용(+벤치마크)
 수량·평단 등 개인 포트폴리오 정보는 포함하지 않음 (공개 저장소용)"""
 import json
 import sys
@@ -33,6 +33,8 @@ MACRO = {  # 이름: (티커, 시장)   G = 24시간 자산(뉴욕 17시 기준)
     "KOSPI": ("^KS11", "KR"), "KOSDAQ": ("^KQ11", "KR"), "닛케이225": ("^N225", "JP"),
     "금": ("GC=F", "G"), "구리": ("HG=F", "G"),
 }
+PROXY = {"KOSPI": ("069500.KS", "KR"), "KOSDAQ": ("229200.KS", "KR"),
+         "닛케이225": ("1321.T", "JP")}   # 야후 지수 일봉이 하루 늦을 때 대용 ETF
 CLOSE = {"KR": ("Asia/Seoul", 15, 40), "JP": ("Asia/Tokyo", 15, 40),
          "US": ("America/New_York", 16, 15), "G": ("America/New_York", 17, 0)}
 TH = dict(day_up=5, day_down=-5, d5=10, d20=20, gap=10, gap_hot=15,
@@ -256,6 +258,36 @@ def by_day(s):
     return s[~s.index.duplicated(keep="last")]
 
 
+def fix_stale(macro, dts, ms):
+    """야후 지수 일봉이 종목 일봉보다 늦으면(예: KOSPI 전일값) 대용 ETF로 추정, 실패 시 None"""
+    ref = {"KR": ms.get("삼성전자", {}).get("dt"), "US": ms.get("알파벳", {}).get("dt")}
+    ref["JP"] = ref["KR"]
+    stale, proxied = [], {}
+    for name, (t, mkt) in MACRO.items():
+        r, d0, old = ref.get(mkt), dts.get(name), macro.get(name)
+        if not (r and d0 and old and d0 < r):
+            continue
+        stale.append(name)
+        macro[name] = None
+        px = PROXY.get(name)
+        if not px:
+            continue
+        etf = drop_partial(hist(px[0]), px[1])
+        if etf is None or etf.empty or str(etf.index[-1].date()) != r:
+            continue
+        c = etf["Close"].astype(float)
+        base = c[[str(i.date()) == d0 for i in c.index]]
+        out, _ = chg(c)
+        if out is None or not len(base):
+            continue
+        out[0] = rnd(old[0] * float(c.iloc[-1]) / float(base.iloc[-1]), 2)
+        macro.pop(name, None)
+        macro[name + "(추정)"] = out
+        proxied[name] = px[0]
+        dts[name] = r
+    return ref, stale, proxied
+
+
 def dump(path, obj):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, separators=(",", ":"))
@@ -340,6 +372,8 @@ def main():
     if y10 is not None and y2 is not None:
         macro["10Y-2Y(FRED)"], _ = chg_abs((y10 - y2).dropna())
 
+    ref, stale, proxied = fix_stale(macro, dts, ms)
+
     alerts = []
     for name, m in ms.items():
         f = event_flags(m)
@@ -351,7 +385,7 @@ def main():
              "정배열": sum(1 for m in ms.values() if m["al"] == "정"),
              "역배열": len(rev),
              "RSI≤30": len(rsi30)}
-    asof = {"KR": dts.get("KOSPI"), "JP": dts.get("닛케이225"), "US": dts.get("S&P500"),
+    asof = {"KR": ref.get("KR") or dts.get("KOSPI"), "JP": dts.get("닛케이225"), "US": dts.get("S&P500"),
             "FX": dts.get("USD/KRW"), "UST10": dts.get("UST10"), "FRED": dts.get("FRED")}
     gen = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M")
 
@@ -359,7 +393,7 @@ def main():
         "gen": gen, "asof": asof,
         "stocks": {k: [m["c"], m["p"], m["d1"]] for k, m in ms.items()},
         "alerts": alerts, "state": state, "rev": rev, "rsi30": rsi30,
-        "macro": macro, "missing": missing,
+        "macro": macro, "stale": stale, "proxy": proxied, "missing": missing,
     })
     dump("weekly.json", {
         "gen": gen, "asof": asof, "fields": FIELDS_W,
