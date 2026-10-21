@@ -1,4 +1,4 @@
-"""fetch_signals.py (v5) - 장 마감 확정 종가 기준 신호 계산
+"""fetch_signals.py (v6) - 장 마감 확정 종가 기준 신호 계산
 daily.json : 매일 읽는 경량 파일(+역배열·RSI≤30 종목 목록, 지수 지연 시 ETF 대용 추정) / weekly.json : 토요일 심층 점검용(+벤치마크)
 수량·평단 등 개인 포트폴리오 정보는 포함하지 않음 (공개 저장소용)"""
 import json
@@ -239,17 +239,27 @@ def chg_abs(c):
     return out, str(c.index[-1].date())
 
 
-def fred(series):
-    try:
-        r = requests.get(f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series}", timeout=20)
-        r.raise_for_status()
-        df = pd.read_csv(StringIO(r.text))
-        s = pd.to_numeric(df.iloc[:, 1], errors="coerce")
-        s.index = pd.to_datetime(df.iloc[:, 0])
-        return s.dropna().tail(60)
-    except Exception as e:
-        print("FRED 실패", series, e)
-        return None
+def fred(series, tries=3):
+    """FRED CSV (재시도·헤더·형식 검증). 실패 시 None"""
+    url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series}"
+    hdr = {"User-Agent": "Mozilla/5.0 (compatible; stock-data-relay)", "Accept": "text/csv"}
+    for i in range(tries):
+        try:
+            r = requests.get(url, headers=hdr, timeout=30)
+            r.raise_for_status()
+            if not r.text.lstrip()[:20].lower().startswith(("date", "observation_date")):
+                raise ValueError("CSV 아님: " + r.text[:60].replace("\n", " "))
+            df = pd.read_csv(StringIO(r.text))
+            s = pd.to_numeric(df.iloc[:, 1], errors="coerce")
+            s.index = pd.to_datetime(df.iloc[:, 0])
+            s = s.dropna().tail(60)
+            if len(s) >= 25:
+                return s
+            raise ValueError("데이터 부족")
+        except Exception as e:
+            print("FRED 실패", series, i + 1, e)
+            time.sleep(3 * (i + 1))
+    return None
 
 
 def by_day(s):
@@ -371,6 +381,19 @@ def main():
         macro["미국2Y(FRED)"], dts["FRED"] = chg_abs(y2)
     if y10 is not None and y2 is not None:
         macro["10Y-2Y(FRED)"], _ = chg_abs((y10 - y2).dropna())
+
+    if y2 is None or y10 is None:      # FRED 실패 시 직전 파일의 값을 (기준일 포함) 재사용
+        try:
+            with open("daily.json", encoding="utf-8") as f:
+                prev = json.load(f)
+            for k in ("미국2Y(FRED)", "10Y-2Y(FRED)"):
+                if k not in macro and prev.get("macro", {}).get(k):
+                    macro[k] = prev["macro"][k]
+            if "FRED" not in dts and prev.get("asof", {}).get("FRED"):
+                dts["FRED"] = prev["asof"]["FRED"]
+            print("FRED 직전 값 재사용")
+        except Exception as e:
+            print("FRED 직전 값 재사용 실패", e)
 
     ref, stale, proxied = fix_stale(macro, dts, ms)
 
