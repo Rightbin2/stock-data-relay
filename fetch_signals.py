@@ -1,4 +1,4 @@
-"""fetch_signals.py (v6) - 장 마감 확정 종가 기준 신호 계산
+"""fetch_signals.py (v7) - 장 마감 확정 종가 기준 신호 계산
 daily.json : 매일 읽는 경량 파일(+역배열·RSI≤30 종목 목록, 지수 지연 시 ETF 대용 추정) / weekly.json : 토요일 심층 점검용(+벤치마크)
 수량·평단 등 개인 포트폴리오 정보는 포함하지 않음 (공개 저장소용)"""
 import json
@@ -239,27 +239,85 @@ def chg_abs(c):
     return out, str(c.index[-1].date())
 
 
-def fred(series, tries=3):
-    """FRED CSV (재시도·헤더·형식 검증). 실패 시 None"""
-    url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series}"
-    hdr = {"User-Agent": "Mozilla/5.0 (compatible; stock-data-relay)", "Accept": "text/csv"}
+UA = {"User-Agent": "Mozilla/5.0 (compatible; stock-data-relay)"}
+TIMEOUT = 10          # 외부 요청 1회 제한(초)
+
+
+def http_text(url, tries=3):
     for i in range(tries):
         try:
-            r = requests.get(url, headers=hdr, timeout=30)
+            r = requests.get(url, headers=UA, timeout=TIMEOUT)
             r.raise_for_status()
-            if not r.text.lstrip()[:20].lower().startswith(("date", "observation_date")):
-                raise ValueError("CSV 아님: " + r.text[:60].replace("\n", " "))
-            df = pd.read_csv(StringIO(r.text))
-            s = pd.to_numeric(df.iloc[:, 1], errors="coerce")
-            s.index = pd.to_datetime(df.iloc[:, 0])
-            s = s.dropna().tail(60)
-            if len(s) >= 25:
-                return s
-            raise ValueError("데이터 부족")
+            return r.text
         except Exception as e:
-            print("FRED 실패", series, i + 1, e)
-            time.sleep(3 * (i + 1))
+            print("요청 실패", url[:70], i + 1, e)
+            time.sleep(1 + i)
     return None
+
+
+def treasury():
+    """미 재무부 일별 par yield → (10Y, 2Y) Series. 실패 시 (None, None)"""
+    year = datetime.now(ZoneInfo("America/New_York")).year
+
+    def load(y):
+        url = ("https://home.treasury.gov/resource-center/data-chart-center/interest-rates/"
+               f"daily-treasury-rates.csv/{y}/all?type=daily_treasury_yield_curve"
+               f"&field_tdr_date_value={y}&page&_format=csv")
+        txt = http_text(url)
+        if not txt or not txt.replace('"', "").lstrip().lower().startswith("date"):
+            return None
+        df = pd.read_csv(StringIO(txt))
+        df.columns = [str(c).strip().lower() for c in df.columns]
+        if not {"date", "2 yr", "10 yr"} <= set(df.columns):
+            return None
+        out = df[["date", "2 yr", "10 yr"]].copy()
+        out["date"] = pd.to_datetime(out["date"], format="%m/%d/%Y", errors="coerce")
+        out["2 yr"] = pd.to_numeric(out["2 yr"], errors="coerce")
+        out["10 yr"] = pd.to_numeric(out["10 yr"], errors="coerce")
+        return out.dropna()
+
+    cur = load(year)
+    if cur is None:
+        return None, None
+    if len(cur) < 30:                       # 연초에는 전년도 데이터와 합침
+        prev = load(year - 1)
+        if prev is not None:
+            cur = pd.concat([cur, prev])
+    cur = cur.drop_duplicates("date").sort_values("date").set_index("date").tail(60)
+    if len(cur) < 25:
+        return None, None
+    return cur["10 yr"], cur["2 yr"]
+
+
+def fred(series, tries=2):
+    """FRED CSV (보조 출처). 실패 시 None"""
+    txt = http_text(f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series}", tries)
+    try:
+        if not txt or not txt.lstrip()[:20].lower().startswith(("date", "observation_date")):
+            raise ValueError("CSV 아님")
+        df = pd.read_csv(StringIO(txt))
+        s = pd.to_numeric(df.iloc[:, 1], errors="coerce")
+        s.index = pd.to_datetime(df.iloc[:, 0])
+        s = s.dropna().tail(60)
+        if len(s) >= 25:
+            return s
+        raise ValueError("데이터 부족")
+    except Exception as e:
+        print("FRED 실패", series, e)
+        return None
+
+
+def get_yields():
+    """금리: 1순위 재무부, 2순위 FRED (둘 다 실패하면 직전 값 재사용은 main에서)"""
+    y10, y2 = treasury()
+    if y10 is not None and y2 is not None:
+        print("금리 출처: 재무부")
+        return y10, y2
+    y10 = fred("DGS10")
+    y2 = fred("DGS2") if y10 is not None else None
+    if y10 is not None and y2 is not None:
+        print("금리 출처: FRED")
+    return y10, y2
 
 
 def by_day(s):
@@ -376,7 +434,7 @@ def main():
         if s.iloc[-1] > 20:                          # 구버전 ×10 표기 방어
             s = s / 10
         macro["미국10Y"], dts["UST10"] = chg_abs(s)
-    y10, y2 = fred("DGS10"), fred("DGS2")            # 2Y·스프레드: FRED(지연 가능)
+    y10, y2 = get_yields()                            # 2Y·스프레드: 재무부 → FRED (키 이름은 호환 위해 (FRED) 유지)
     if y2 is not None:
         macro["미국2Y(FRED)"], dts["FRED"] = chg_abs(y2)
     if y10 is not None and y2 is not None:
