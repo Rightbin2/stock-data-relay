@@ -1,24 +1,59 @@
 name: Fetch Stock Data
+
 on:
   schedule:
-    - cron: '17 22 * * 1-5'   # UTC 월~금 22:17 = KST 화~토 07:17
+    # GitHub 정기 실행은 보통 2~4시간 늦게 시작되므로, 일부러 일찍 시작시키고
+    # 아래 '대기' 단계에서 미국 마감(뉴욕 17:05) 이후까지 기다린 뒤 데이터를 받는다.
+    - cron: '0 18 * * 1-5'   # UTC 월~금 18:00 = KST 화~토 03:00 (메인)
+    - cron: '0 20 * * 1-5'   # UTC 월~금 20:00 = KST 화~토 05:00 (백업)
   workflow_dispatch:
+
+concurrency:
+  group: fetch-stock-data
+  cancel-in-progress: false
 
 jobs:
   fetch:
     runs-on: ubuntu-latest
+    timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
       - run: pip install -r requirements.txt
-      - run: python fetch_data.py
-      - run: python fetch_signals.py
-        continue-on-error: true    # 신규 스크립트가 실패해도 기존 data.json은 정상 커밋
-      - run: |
+
+      - name: 뉴욕 17:05 이후까지 대기 (정기 실행일 때만)
+        if: github.event_name == 'schedule'
+        run: |
+          python - <<'PY'
+          import time
+          from datetime import datetime
+          from zoneinfo import ZoneInfo
+          now = datetime.now(ZoneInfo("America/New_York"))
+          target = now.replace(hour=17, minute=5, second=0, microsecond=0)
+          wait = (target - now).total_seconds()
+          if 0 < wait < 6 * 3600:
+              print("대기", int(wait), "초")
+              time.sleep(wait)
+          else:
+              print("대기 불필요")
+          PY
+
+      - name: 신호 계산 (daily.json, weekly.json)
+        run: python fetch_signals.py
+
+      - name: 구버전 data.json (실패해도 무시)
+        run: python fetch_data.py
+        continue-on-error: true
+
+      - name: 저장
+        run: |
           git config user.name "github-actions"
           git config user.email "actions@github.com"
           git add -A
           git commit -m "update data" || echo "no changes"
+          git pull --rebase origin main
           git push
