@@ -1,7 +1,9 @@
-"""fetch_signals.py (v7) - 장 마감 확정 종가 기준 신호 계산
-daily.json : 매일 읽는 경량 파일(+역배열·RSI≤30 종목 목록, 지수 지연 시 ETF 대용 추정) / weekly.json : 토요일 심층 점검용(+벤치마크)
+"""fetch_signals.py (v9) - 장 마감 확정 종가 기준 신호 계산
+daily.json : 매일 읽는 경량 파일 / weekly.json : 토요일 심층 점검용
+지수는 공식·주요 출처의 실제 종가만 사용(ETF 대용·추정 금지), 못 구하면 null + pending 표시
 수량·평단 등 개인 포트폴리오 정보는 포함하지 않음 (공개 저장소용)"""
 import json
+import re
 import sys
 import time
 from datetime import datetime
@@ -31,10 +33,13 @@ MACRO = {  # 이름: (티커, 시장)   G = 24시간 자산(뉴욕 17시 기준)
     "USD/KRW": ("KRW=X", "G"), "DXY": ("DX-Y.NYB", "G"), "WTI": ("CL=F", "G"),
     "VIX": ("^VIX", "US"), "S&P500": ("^GSPC", "US"), "NASDAQ": ("^IXIC", "US"),
     "KOSPI": ("^KS11", "KR"), "KOSDAQ": ("^KQ11", "KR"), "닛케이225": ("^N225", "JP"),
-    "금": ("GC=F", "G"), "구리": ("HG=F", "G"),
+    "금": ("GC=F", "G"), "구리": ("HG=F", "G"), "Brent": ("BZ=F", "G"),
 }
-PROXY = {"KOSPI": ("069500.KS", "KR"), "KOSDAQ": ("229200.KS", "KR"),
-         "닛케이225": ("1321.T", "JP")}   # 야후 지수 일봉이 하루 늦을 때 대용 ETF
+PROBES = {  # 시장 breadth·KORU 점검용 (보유 아님)
+    "DOW": ("^DJI", "US"), "Russell2000": ("^RUT", "US"), "SOX": ("^SOX", "US"),
+    "EWY(MSCI Korea)": ("EWY", "US"), "SK하이닉스": ("000660.KS", "KR"),
+    "KODEX반도체": ("091160.KS", "KR"), "TOPIX(1306)": ("1306.T", "JP"),
+}
 CLOSE = {"KR": ("Asia/Seoul", 15, 40), "JP": ("Asia/Tokyo", 15, 40),
          "US": ("America/New_York", 16, 15), "G": ("America/New_York", 17, 0)}
 TH = dict(day_up=5, day_down=-5, d5=10, d20=20, gap=10, gap_hot=15,
@@ -256,40 +261,52 @@ def http_text(url, tries=3):
 
 
 def treasury():
-    """미 재무부 일별 par yield → (10Y, 2Y) Series. 실패 시 (None, None)"""
+    """미 재무부 Daily Par Yield Curve → {y2,y10,y30,real10} Series. 실패 시 None"""
     year = datetime.now(ZoneInfo("America/New_York")).year
 
-    def load(y):
+    def load(kind, y, cols):
         url = ("https://home.treasury.gov/resource-center/data-chart-center/interest-rates/"
-               f"daily-treasury-rates.csv/{y}/all?type=daily_treasury_yield_curve"
-               f"&field_tdr_date_value={y}&page&_format=csv")
+               f"daily-treasury-rates.csv/{y}/all?type={kind}&field_tdr_date_value={y}&page&_format=csv")
         txt = http_text(url)
         if not txt or not txt.replace('"', "").lstrip().lower().startswith("date"):
             return None
         df = pd.read_csv(StringIO(txt))
         df.columns = [str(c).strip().lower() for c in df.columns]
-        if not {"date", "2 yr", "10 yr"} <= set(df.columns):
+        if not set(["date"] + cols) <= set(df.columns):
             return None
-        out = df[["date", "2 yr", "10 yr"]].copy()
+        out = df[["date"] + cols].copy()
         out["date"] = pd.to_datetime(out["date"], format="%m/%d/%Y", errors="coerce")
-        out["2 yr"] = pd.to_numeric(out["2 yr"], errors="coerce")
-        out["10 yr"] = pd.to_numeric(out["10 yr"], errors="coerce")
-        return out.dropna()
+        for c in cols:
+            out[c] = pd.to_numeric(out[c], errors="coerce")
+        return out.dropna(subset=["date"])
 
-    cur = load(year)
-    if cur is None:
-        return None, None
-    if len(cur) < 30:                       # 연초에는 전년도 데이터와 합침
-        prev = load(year - 1)
-        if prev is not None:
-            cur = pd.concat([cur, prev])
-    cur = cur.drop_duplicates("date").sort_values("date").set_index("date").tail(60)
-    if len(cur) < 25:
-        return None, None
-    return cur["10 yr"], cur["2 yr"]
+    def table(kind, cols):
+        cur = load(kind, year, cols)
+        if cur is None:
+            return None
+        if len(cur) < 30:                       # 연초에는 전년도 데이터와 합침
+            prev = load(kind, year - 1, cols)
+            if prev is not None:
+                cur = pd.concat([cur, prev])
+        return cur.drop_duplicates("date").sort_values("date").set_index("date")
+
+    nom = table("daily_treasury_yield_curve", ["2 yr", "10 yr", "30 yr"])
+    if nom is None:
+        return None
+    out = {k: nom[c].dropna().tail(60) for k, c in (("y2", "2 yr"), ("y10", "10 yr"), ("y30", "30 yr"))}
+    if len(out["y2"]) < 25 or len(out["y10"]) < 25:
+        return None
+    out["real10"] = None
+    try:
+        rl = table("daily_treasury_real_yield_curve", ["10 yr"])
+        if rl is not None:
+            out["real10"] = rl["10 yr"].dropna().tail(60)
+    except Exception as e:
+        print("실질금리 실패", e)
+    return out
 
 
-def fred(series, tries=2):
+def fred(series, tries=2, keep=60):
     """FRED CSV (보조 출처). 실패 시 None"""
     txt = http_text(f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series}", tries)
     try:
@@ -298,7 +315,7 @@ def fred(series, tries=2):
         df = pd.read_csv(StringIO(txt))
         s = pd.to_numeric(df.iloc[:, 1], errors="coerce")
         s.index = pd.to_datetime(df.iloc[:, 0])
-        s = s.dropna().tail(60)
+        s = s.dropna().tail(keep)
         if len(s) >= 25:
             return s
         raise ValueError("데이터 부족")
@@ -308,16 +325,130 @@ def fred(series, tries=2):
 
 
 def get_yields():
-    """금리: 1순위 재무부, 2순위 FRED (둘 다 실패하면 직전 값 재사용은 main에서)"""
-    y10, y2 = treasury()
-    if y10 is not None and y2 is not None:
+    """금리: 1순위 재무부(2Y/10Y/30Y, 실질 10Y), 2순위 FRED. 반환 (dict|None, 출처)"""
+    t = treasury()
+    if t is not None:
         print("금리 출처: 재무부")
-        return y10, y2
+        return t, "treasury"
     y10 = fred("DGS10")
     y2 = fred("DGS2") if y10 is not None else None
     if y10 is not None and y2 is not None:
         print("금리 출처: FRED")
-    return y10, y2
+        return {"y2": y2, "y10": y10, "y30": fred("DGS30", 1), "real10": None}, "fred"
+    return None, None
+
+
+def tsy_long(kind, cols, years=6):
+    """재무부 CSV를 최근 N개 연도 이어붙여 장기 시계열(DataFrame)로. 실패 시 None"""
+    y0 = datetime.now(ZoneInfo("America/New_York")).year
+    parts = []
+    for y in range(y0, y0 - years, -1):
+        url = ("https://home.treasury.gov/resource-center/data-chart-center/interest-rates/"
+               f"daily-treasury-rates.csv/{y}/all?type={kind}&field_tdr_date_value={y}&page&_format=csv")
+        txt = http_text(url, 2)
+        if not txt or not txt.replace('"', "").lstrip().lower().startswith("date"):
+            continue
+        df = pd.read_csv(StringIO(txt))
+        df.columns = [str(c).strip().lower() for c in df.columns]
+        if not set(["date"] + cols) <= set(df.columns):
+            continue
+        d = df[["date"] + cols].copy()
+        d["date"] = pd.to_datetime(d["date"], format="%m/%d/%Y", errors="coerce")
+        for c in cols:
+            d[c] = pd.to_numeric(d[c], errors="coerce")
+        parts.append(d.dropna(subset=["date"]))
+    if not parts:
+        return None
+    return pd.concat(parts).drop_duplicates("date").sort_values("date").set_index("date")
+
+
+def pct_rank(series, window=1260):
+    """마지막 값이 최근 window(약 5년) 안에서 차지하는 백분위(0~100)"""
+    h = series.dropna().tail(window)
+    if len(h) < 250:
+        return None
+    return round(float((h.iloc[:-1] <= h.iloc[-1]).mean() * 100), 1)
+
+
+def treasury_monitor():
+    """미국채 진입환경 3요인 모니터(G안): 5년 상대가치 + 실질금리 + BE + 20일 모멘텀 + 변동성 상한.
+    매수 신호가 아니라 상태 표시. 계산은 전부 여기서 끝내고 루틴에는 결과만 넘긴다."""
+    nom = tsy_long("daily_treasury_yield_curve", ["10 yr", "30 yr"])
+    real = tsy_long("daily_treasury_real_yield_curve", ["10 yr"])
+    src = "treasury"
+    if nom is None or nom["10 yr"].dropna().shape[0] < 250:
+        y10, y30 = fred("DGS10", 2, 1400), fred("DGS30", 1, 1400)
+        r10 = fred("DFII10", 1, 1400)
+        if y10 is None or y30 is None:
+            return None
+        nom = pd.DataFrame({"10 yr": y10, "30 yr": y30})
+        real = pd.DataFrame({"10 yr": r10}) if r10 is not None else None
+        src = "fred"
+    d = nom.dropna(subset=["10 yr"]).copy()
+    d["rl"] = real["10 yr"] if real is not None else float("nan")
+    d["be"] = d["10 yr"] - d["rl"]
+    y10, y30 = d["10 yr"], d["30 yr"].dropna()
+    if len(y30) < 250:
+        return None
+    rl, be = d["rl"].dropna(), d["be"].dropna()
+    vol = y10.diff().rolling(60).std()
+    spr = (d["30 yr"] - d["10 yr"]).dropna()
+
+    def ch(s, n=20):
+        s = s.dropna()
+        return round(float(s.iloc[-1] - s.iloc[-1 - n]), 3) if len(s) > n else None
+
+    o = {"asof": str(y10.index[-1].date()), "src": src,
+         "y10": round(float(y10.iloc[-1]), 3), "y30": round(float(y30.iloc[-1]), 3),
+         "y10_pct_5y": pct_rank(y10), "y30_pct_5y": pct_rank(y30),
+         "real10": round(float(rl.iloc[-1]), 3) if len(rl) else None,
+         "real10_pct_5y": pct_rank(rl) if len(rl) else None,
+         "be10": round(float(be.iloc[-1]), 3) if len(be) else None,
+         "y10_chg20": ch(y10), "y30_chg20": ch(y30), "be10_chg20": ch(be) if len(be) else None,
+         "y10_vol60": round(float(vol.iloc[-1]), 4) if vol.notna().any() else None,
+         "y10_vol_pct_5y": pct_rank(vol), "spr30_10": round(float(spr.iloc[-1]), 3),
+         "spr30_10_pct_5y": pct_rank(spr)}
+
+    def score(pv, pr, rpct, bech, chg_, long_spr=None):
+        if pv is None or chg_ is None:
+            return None
+        sc = 2 if pv >= 80 else 1 if pv >= 60 else 0 if pv >= 40 else -1
+        if rpct is not None:
+            sc += 1 if rpct >= 75 else -1 if rpct < 40 else 0
+        if bech is not None:
+            sc += 0 if bech <= 0.05 else -1 if bech <= 0.15 else -2
+        sc += 1 if chg_ <= 0 else 0 if chg_ <= 0.25 else -1 if chg_ <= 0.50 else -2
+        if long_spr is not None:
+            sc += 0 if long_spr >= 70 else -1 if long_spr >= 30 else -2
+        return sc
+
+    def state(sc, vol_hi):
+        if sc is None:
+            return "unknown"
+        st = "green" if sc >= 3 else "yellow" if sc >= 1 else "orange" if sc >= -1 else "red"
+        if vol_hi and st == "green":
+            st = "yellow"                    # 변동성 상위 10%면 최대 노랑
+        return st
+
+    vol_hi = o["y10_vol_pct_5y"] is not None and o["y10_vol_pct_5y"] >= 90
+    o["score_10y"] = score(o["y10_pct_5y"], None, o["real10_pct_5y"], o["be10_chg20"], o["y10_chg20"])
+    o["score_30y"] = score(o["y30_pct_5y"], None, o["real10_pct_5y"], o["be10_chg20"], o["y30_chg20"],
+                           o["spr30_10_pct_5y"] if o["spr30_10_pct_5y"] is not None else 50)
+    o["state_10y"], o["state_30y"] = state(o["score_10y"], vol_hi), state(o["score_30y"], vol_hi)
+    tags = []
+    if o["real10_pct_5y"] is not None and o["real10_pct_5y"] >= 75:
+        tags.append("REAL_YIELD_HIGH")
+    if o["be10_chg20"] is not None and o["be10_chg20"] > 0.15:
+        tags.append("INFLATION_REPRICING")
+    if o["y10_chg20"] is not None and o["y10_chg20"] > 0.50:
+        tags.append("RATES_RISING_FAST")
+    if vol_hi:
+        tags.append("HIGH_RATE_VOL")
+    if o["spr30_10_pct_5y"] is not None and o["spr30_10_pct_5y"] < 30:
+        tags.append("LONG_END_POOR_COMPENSATION")
+    o["tags"] = tags or ["NORMAL"]
+    o["dq"] = "ok" if (real is not None and o["real10_pct_5y"] is not None) else "no-real-yield"
+    return o
 
 
 def by_day(s):
@@ -326,34 +457,134 @@ def by_day(s):
     return s[~s.index.duplicated(keep="last")]
 
 
-def fix_stale(macro, dts, ms):
-    """야후 지수 일봉이 종목 일봉보다 늦으면(예: KOSPI 전일값) 대용 ETF로 추정, 실패 시 None"""
+def naver_index(code):
+    """네이버 금융 일별 지수 시세(KRX 종가 반영). 25행 미만이면 None"""
+    pat = re.compile(r'<td class="date">\s*(\d{4}\.\d{2}\.\d{2})\s*</td>\s*'
+                     r'<td class="number_1">\s*([\d,]+\.\d+)\s*</td>')
+    rows = {}
+    for page in range(1, 8):
+        txt = http_text(f"https://finance.naver.com/sise/sise_index_day.naver?code={code}&page={page}", 2)
+        if not txt:
+            break
+        for d_, v in pat.findall(txt):
+            rows[pd.Timestamp(d_.replace(".", "-"))] = float(v.replace(",", ""))
+        if len(rows) >= 25:
+            break
+    return pd.Series(rows).sort_index() if len(rows) >= 25 else None
+
+
+def nikkei_official():
+    """닛케이 공식(indexes.nikkei.co.jp) 일별 종가 CSV"""
+    txt = http_text("https://indexes.nikkei.co.jp/nkave/historical/nikkei_stock_average_daily_en.csv", 2)
+    if not txt:
+        return None
+    rows = {}
+    for line in txt.splitlines():
+        p = [x.strip().strip('"') for x in line.lstrip("\ufeff").split(",")]
+        if len(p) >= 5:
+            try:
+                rows[pd.Timestamp(datetime.strptime(p[0], "%Y/%m/%d"))] = float(p[4].replace(",", ""))
+            except ValueError:
+                continue
+    return pd.Series(rows).sort_index().tail(60) if len(rows) >= 25 else None
+
+
+def cboe_vix():
+    """CBOE 공식 VIX 일별 종가 CSV"""
+    txt = http_text("https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv", 2)
+    if not txt:
+        return None
+    df = pd.read_csv(StringIO(txt))
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    if not {"date", "close"} <= set(df.columns):
+        return None
+    s = pd.Series(pd.to_numeric(df["close"], errors="coerce").values,
+                  index=pd.to_datetime(df["date"], format="%m/%d/%Y", errors="coerce"))
+    s = s[s.index.notna()].dropna().sort_index().tail(60)
+    return s if len(s) >= 25 else None
+
+
+def stooq(sym):
+    """Stooq 일별 종가 CSV (보조 출처)"""
+    txt = http_text(f"https://stooq.com/q/d/l/?s={sym}&i=d", 2)
+    if not txt or not txt.lstrip().lower().startswith("date"):
+        return None
+    df = pd.read_csv(StringIO(txt))
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    if not {"date", "close"} <= set(df.columns):
+        return None
+    s = pd.Series(pd.to_numeric(df["close"], errors="coerce").values,
+                  index=pd.to_datetime(df["date"], errors="coerce"))
+    s = s[s.index.notna()].dropna().sort_index().tail(60)
+    return s if len(s) >= 25 else None
+
+
+IDX_SRC = {   # 우선순위: 공식/주요 한국·일본·CBOE → Stooq → (같은 날짜면) 야후
+    "KOSPI": [("naver", lambda: naver_index("KOSPI")), ("stooq", lambda: stooq("^kospi"))],
+    "KOSDAQ": [("naver", lambda: naver_index("KOSDAQ")), ("stooq", lambda: stooq("^kosdaq"))],
+    "닛케이225": [("nikkei", nikkei_official), ("stooq", lambda: stooq("^nkx"))],
+    "VIX": [("cboe", cboe_vix), ("stooq", lambda: stooq("^vix"))],
+}
+
+
+def pick_index(name, ysr, ref):
+    """기준일(ref) 이상의 실제 종가 시계열을 고른다. 없으면 (None, None) = 종가 확인 대기"""
+    y = by_day(ysr.astype(float).dropna()) if ysr is not None and len(ysr) else None
+    for label, fn in IDX_SRC[name]:
+        try:
+            s = fn()
+        except Exception as e:
+            print("지수 조회 오류", name, label, e)
+            s = None
+        if s is None or s.empty:
+            continue
+        s = by_day(s.astype(float).dropna())
+        if y is not None:                       # 교차검증: 야후와 같은 날짜 값이 1% 넘게 다르면 기각
+            common = s.index.intersection(y.index)
+            if len(common) and abs(s[common[-1]] / y[common[-1]] - 1) > 0.01:
+                print("지수 교차검증 불일치", name, label)
+                continue
+        if str(s.index[-1].date()) >= ref:
+            return label, s
+    if y is not None and len(y) and str(y.index[-1].date()) >= ref:
+        return "yahoo", y
+    return None, None
+
+
+def apply_indices(macro, dts, ysr, ms):
+    """KOSPI·KOSDAQ·닛케이·VIX를 공식/주요 출처의 실제 종가로 교체 (추정·대용 없음)"""
     ref = {"KR": ms.get("삼성전자", {}).get("dt"), "US": ms.get("알파벳", {}).get("dt")}
     ref["JP"] = ref["KR"]
-    stale, proxied = [], {}
-    for name, (t, mkt) in MACRO.items():
-        r, d0, old = ref.get(mkt), dts.get(name), macro.get(name)
-        if not (r and d0 and old and d0 < r):
+    mk = {"KOSPI": "KR", "KOSDAQ": "KR", "닛케이225": "JP", "VIX": "US"}
+    src, pending = {}, []
+    for name, m in mk.items():
+        r = ref.get(m)
+        if not r:
             continue
-        stale.append(name)
-        macro[name] = None
-        px = PROXY.get(name)
-        if not px:
+        label, s = pick_index(name, ysr.get(name), r)
+        if s is None:
+            macro[name] = None
+            pending.append(name)
             continue
-        etf = drop_partial(hist(px[0]), px[1])
-        if etf is None or etf.empty or str(etf.index[-1].date()) != r:
-            continue
-        c = etf["Close"].astype(float)
-        base = c[[str(i.date()) == d0 for i in c.index]]
-        out, _ = chg(c)
-        if out is None or not len(base):
-            continue
-        out[0] = rnd(old[0] * float(c.iloc[-1]) / float(base.iloc[-1]), 2)
-        macro.pop(name, None)
-        macro[name + "(추정)"] = out
-        proxied[name] = px[0]
-        dts[name] = r
-    return ref, stale, proxied
+        macro[name], dts[name] = chg(s)
+        src[name] = label
+    return ref, src, pending
+
+
+def probes():
+    """breadth·KORU 점검용 보조 지표: 이름: [종가, 1일%, 5일%, 기준일]"""
+    out = {}
+    for name, (t, mkt) in PROBES.items():
+        try:
+            df = drop_partial(hist(t, retries=1), mkt)
+            if df is None or df.empty:
+                continue
+            c = df["Close"].astype(float)
+            out[name] = [rnd(c.iloc[-1]), pct(c.iloc[-1], c.iloc[-2]) if len(c) > 1 else None,
+                         pct(c.iloc[-1], c.iloc[-6]) if len(c) > 5 else None, str(c.index[-1].date())]
+        except Exception as e:
+            print("probe 실패", name, e)
+    return out
 
 
 def dump(path, obj):
@@ -415,12 +646,13 @@ def main():
         print("누락 과다:", missing)
         sys.exit(1)          # 이전 정상 파일 유지
 
-    macro, dts = {}, {}
+    macro, dts, ysr = {}, {}, {}
     for name, (t, mkt) in MACRO.items():
         df = drop_partial(hist(t), mkt)
         if df is None or df.empty:
             macro[name] = None
             continue
+        ysr[name] = df["Close"]
         macro[name], dts[name] = chg(df["Close"])
 
     krw, jpy = drop_partial(hist("KRW=X"), "G"), drop_partial(hist("JPY=X"), "G")
@@ -428,32 +660,54 @@ def main():
         s = (by_day(krw["Close"]) / by_day(jpy["Close"]) * 100).dropna()
         macro["JPY/KRW(100엔)"], _ = chg(s)
 
-    t10 = drop_partial(hist("^TNX"), "G")           # 10Y: 당일 종가
+    ref, idx_src, pending = apply_indices(macro, dts, ysr, ms)
+
+    t10 = drop_partial(hist("^TNX"), "G")           # 시장금리(참고용). 재무부 CMT와 한 시계열로 섞지 않음
     if t10 is not None and not t10.empty:
         s = t10["Close"].astype(float)
         if s.iloc[-1] > 20:                          # 구버전 ×10 표기 방어
             s = s / 10
-        macro["미국10Y"], dts["UST10"] = chg_abs(s)
-    y10, y2 = get_yields()                            # 2Y·스프레드: 재무부 → FRED (키 이름은 호환 위해 (FRED) 유지)
-    if y2 is not None:
-        macro["미국2Y(FRED)"], dts["FRED"] = chg_abs(y2)
-    if y10 is not None and y2 is not None:
-        macro["10Y-2Y(FRED)"], _ = chg_abs((y10 - y2).dropna())
+        macro["미국10Y(시장)"], dts["UST10"] = chg_abs(s)
 
-    if y2 is None or y10 is None:      # FRED 실패 시 직전 파일의 값을 (기준일 포함) 재사용
+    ydat, ysrc = get_yields()                        # 공식 Daily Treasury Par Yield (재무부 → FRED)
+    if ydat is not None:
+        y10, y2, y30 = ydat["y10"], ydat["y2"], ydat.get("y30")
+        macro["미국10Y"], dts["TSY"] = chg_abs(y10)
+        macro["미국2Y"], _ = chg_abs(y2)
+        if y30 is not None and len(y30) >= 25:
+            macro["미국30Y"], _ = chg_abs(y30)
+        macro["10Y-2Y"], _ = chg_abs((y10 - y2).dropna())
+        if ydat.get("real10") is not None:
+            be = (y10 - ydat["real10"]).dropna()
+            if len(be) >= 25:
+                macro["10Y BE"], _ = chg_abs(be)
+    else:                                            # 실패 시 직전 파일(v8 형식)의 값을 기준일과 함께 재사용
         try:
             with open("daily.json", encoding="utf-8") as f:
                 prev = json.load(f)
-            for k in ("미국2Y(FRED)", "10Y-2Y(FRED)"):
-                if k not in macro and prev.get("macro", {}).get(k):
-                    macro[k] = prev["macro"][k]
-            if "FRED" not in dts and prev.get("asof", {}).get("FRED"):
-                dts["FRED"] = prev["asof"]["FRED"]
-            print("FRED 직전 값 재사용")
+            if prev.get("tsy") in ("treasury", "fred", "prev-reuse"):
+                for k in ("미국10Y", "미국2Y", "미국30Y", "10Y-2Y", "10Y BE"):
+                    if prev.get("macro", {}).get(k):
+                        macro[k] = prev["macro"][k]
+                dts["TSY"] = prev.get("asof", {}).get("TSY")
+                ysrc = "prev-reuse"
+                print("금리 직전 값 재사용")
         except Exception as e:
-            print("FRED 직전 값 재사용 실패", e)
+            print("금리 직전 값 재사용 실패", e)
 
-    ref, stale, proxied = fix_stale(macro, dts, ms)
+    try:
+        tmon = treasury_monitor()
+    except Exception as e:
+        print("국채 모니터 실패", e)
+        tmon = None
+    if tmon is None:                                  # 실패 시 직전 값을 기준일과 함께 재사용
+        try:
+            with open("daily.json", encoding="utf-8") as f:
+                tmon = json.load(f).get("tmon")
+            if tmon:
+                tmon["src"] = "prev-reuse"
+        except Exception:
+            tmon = None
 
     alerts = []
     for name, m in ms.items():
@@ -466,15 +720,20 @@ def main():
              "정배열": sum(1 for m in ms.values() if m["al"] == "정"),
              "역배열": len(rev),
              "RSI≤30": len(rsi30)}
-    asof = {"KR": ref.get("KR") or dts.get("KOSPI"), "JP": dts.get("닛케이225"), "US": dts.get("S&P500"),
-            "FX": dts.get("USD/KRW"), "UST10": dts.get("UST10"), "FRED": dts.get("FRED")}
+    asof = {"KR": ref.get("KR"), "JP": dts.get("닛케이225") or ref.get("JP"), "US": dts.get("S&P500"),
+            "FX": dts.get("USD/KRW"), "TSY": dts.get("TSY"), "UST10": dts.get("UST10")}
+    idx = {k: [dts.get(k), v] for k, v in idx_src.items()}
+    focus = {"KORU": {f: ms["KORU"][f] for f in ("c", "d1", "d5", "d20", "g20", "rsi", "vx", "al",
+                                                  "ma20", "ma60", "ma120", "sup", "res", "st")}} if "KORU" in ms else {}
     gen = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M")
 
     dump("daily.json", {
         "gen": gen, "asof": asof,
         "stocks": {k: [m["c"], m["p"], m["d1"]] for k, m in ms.items()},
         "alerts": alerts, "state": state, "rev": rev, "rsi30": rsi30,
-        "macro": macro, "stale": stale, "proxy": proxied, "missing": missing,
+        "macro": macro, "idx": idx, "pending": pending, "tsy": ysrc,
+        "breadth": probes(), "focus": focus, "missing": missing,
+        "tmon": tmon,
     })
     dump("weekly.json", {
         "gen": gen, "asof": asof, "fields": FIELDS_W,
