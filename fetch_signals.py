@@ -1,4 +1,4 @@
-"""fetch_signals.py (v9) - 장 마감 확정 종가 기준 신호 계산
+"""fetch_signals.py (v10) - 장 마감 확정 종가 기준 신호 계산
 daily.json : 매일 읽는 경량 파일 / weekly.json : 토요일 심층 점검용
 지수는 공식·주요 출처의 실제 종가만 사용(ETF 대용·추정 금지), 못 구하면 null + pending 표시
 수량·평단 등 개인 포트폴리오 정보는 포함하지 않음 (공개 저장소용)"""
@@ -466,11 +466,38 @@ def naver_index(code):
         txt = http_text(f"https://finance.naver.com/sise/sise_index_day.naver?code={code}&page={page}", 2)
         if not txt:
             break
-        for d_, v in pat.findall(txt):
+        found = pat.findall(txt)
+        if not found and page == 1:
+            print("네이버 HTML 형식 불일치:", code, len(txt), repr(txt[:160]))
+        for d_, v in found:
             rows[pd.Timestamp(d_.replace(".", "-"))] = float(v.replace(",", ""))
         if len(rows) >= 25:
             break
     return pd.Series(rows).sort_index() if len(rows) >= 25 else None
+
+
+def naver_mobile(code):
+    """네이버 모바일 증권 JSON(보조). 날짜·종가만 읽는다. 실패 시 None"""
+    import json as _json
+    txt = http_text(f"https://m.stock.naver.com/api/index/{code}/price?pageSize=60&page=1", 2)
+    if not txt:
+        return None
+    try:
+        data = _json.loads(txt)
+        if isinstance(data, dict):
+            data = data.get("priceInfos") or data.get("items") or data.get("data") or []
+        rows = {}
+        for it in data:
+            d_ = str(it.get("localTradedAt") or it.get("tradedAt") or "")[:10]
+            v = it.get("closePrice") or it.get("close")
+            if d_ and v is not None:
+                rows[pd.Timestamp(d_)] = float(str(v).replace(",", ""))
+        if len(rows) >= 25:
+            return pd.Series(rows).sort_index()
+        print("네이버 모바일 행 부족:", code, len(rows))
+    except Exception as e:
+        print("네이버 모바일 해석 실패:", code, e, repr(txt[:120]))
+    return None
 
 
 def nikkei_official():
@@ -520,8 +547,10 @@ def stooq(sym):
 
 
 IDX_SRC = {   # 우선순위: 공식/주요 한국·일본·CBOE → Stooq → (같은 날짜면) 야후
-    "KOSPI": [("naver", lambda: naver_index("KOSPI")), ("stooq", lambda: stooq("^kospi"))],
-    "KOSDAQ": [("naver", lambda: naver_index("KOSDAQ")), ("stooq", lambda: stooq("^kosdaq"))],
+    "KOSPI": [("naver", lambda: naver_index("KOSPI")), ("naver-m", lambda: naver_mobile("KOSPI")),
+              ("stooq", lambda: stooq("^kospi"))],
+    "KOSDAQ": [("naver", lambda: naver_index("KOSDAQ")), ("naver-m", lambda: naver_mobile("KOSDAQ")),
+               ("stooq", lambda: stooq("^kosdaq"))],
     "닛케이225": [("nikkei", nikkei_official), ("stooq", lambda: stooq("^nkx"))],
     "VIX": [("cboe", cboe_vix), ("stooq", lambda: stooq("^vix"))],
 }
@@ -546,6 +575,7 @@ def pick_index(name, ysr, ref):
                 continue
         if str(s.index[-1].date()) >= ref:
             return label, s
+        print("지수 날짜 부족", name, label, "최신", str(s.index[-1].date()), "필요", ref)
     if y is not None and len(y) and str(y.index[-1].date()) >= ref:
         return "yahoo", y
     return None, None
