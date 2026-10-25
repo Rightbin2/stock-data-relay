@@ -1,4 +1,4 @@
-"""fetch_signals.py (v10) - 장 마감 확정 종가 기준 신호 계산
+"""fetch_signals.py (v11) - 장 마감 확정 종가 기준 신호 계산
 daily.json : 매일 읽는 경량 파일 / weekly.json : 토요일 심층 점검용
 지수는 공식·주요 출처의 실제 종가만 사용(ETF 대용·추정 금지), 못 구하면 null + pending 표시
 수량·평단 등 개인 포트폴리오 정보는 포함하지 않음 (공개 저장소용)"""
@@ -547,10 +547,8 @@ def stooq(sym):
 
 
 IDX_SRC = {   # 우선순위: 공식/주요 한국·일본·CBOE → Stooq → (같은 날짜면) 야후
-    "KOSPI": [("naver", lambda: naver_index("KOSPI")), ("naver-m", lambda: naver_mobile("KOSPI")),
-              ("stooq", lambda: stooq("^kospi"))],
-    "KOSDAQ": [("naver", lambda: naver_index("KOSDAQ")), ("naver-m", lambda: naver_mobile("KOSDAQ")),
-               ("stooq", lambda: stooq("^kosdaq"))],
+    "KOSPI": [("naver-m", lambda: naver_mobile("KOSPI")), ("stooq", lambda: stooq("^kospi"))],
+    "KOSDAQ": [("naver-m", lambda: naver_mobile("KOSDAQ")), ("stooq", lambda: stooq("^kosdaq"))],
     "닛케이225": [("nikkei", nikkei_official), ("stooq", lambda: stooq("^nkx"))],
     "VIX": [("cboe", cboe_vix), ("stooq", lambda: stooq("^vix"))],
 }
@@ -568,11 +566,15 @@ def pick_index(name, ysr, ref):
         if s is None or s.empty:
             continue
         s = by_day(s.astype(float).dropna())
-        if y is not None:                       # 교차검증: 야후와 같은 날짜 값이 1% 넘게 다르면 기각
+        if y is not None:                       # 교차검증: 이미 확정된 날(최신일 제외)의 값이 야후와 1% 넘게 다르면 기각
             common = s.index.intersection(y.index)
-            if len(common) and abs(s[common[-1]] / y[common[-1]] - 1) > 0.01:
-                print("지수 교차검증 불일치", name, label)
-                continue
+            if len(common) >= 2:
+                d_ = common[-2]
+                if abs(s[d_] / y[d_] - 1) > 0.01:
+                    print("지수 교차검증 불일치", name, label, str(d_.date()), s[d_], y[d_])
+                    continue
+            if len(common) and common[-1] == s.index[-1] and abs(s[common[-1]] / y[common[-1]] - 1) > 0.01:
+                print("최신일 값이 야후와 다름(공식 출처 채택)", name, label, s.iloc[-1], y[common[-1]])
         if str(s.index[-1].date()) >= ref:
             return label, s
         print("지수 날짜 부족", name, label, "최신", str(s.index[-1].date()), "필요", ref)
