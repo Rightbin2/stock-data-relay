@@ -586,7 +586,12 @@ def pick_index(name, ysr, ref):
 def apply_indices(macro, dts, ysr, ms):
     """KOSPI·KOSDAQ·닛케이·VIX를 공식/주요 출처의 실제 종가로 교체 (추정·대용 없음)"""
     ref = {"KR": ms.get("삼성전자", {}).get("dt"), "US": ms.get("알파벳", {}).get("dt")}
-    ref["JP"] = ref["KR"]
+    # 일본 기준일: 한국 기준일을 강제하지 않고, 야후 닛케이의 최신 확정일(없으면 한국 기준일)을 쓴다 (공식 CSV 갱신 지연으로 인한 불필요한 대기 방지)
+    yn = ysr.get("닛케이225")
+    try:
+        ref["JP"] = str(by_day(yn.astype(float).dropna()).index[-1].date()) if yn is not None and len(yn) else ref["KR"]
+    except Exception:
+        ref["JP"] = ref["KR"]
     mk = {"KOSPI": "KR", "KOSDAQ": "KR", "닛케이225": "JP", "VIX": "US"}
     src, pending = {}, []
     for name, m in mk.items():
