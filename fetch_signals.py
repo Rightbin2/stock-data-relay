@@ -695,6 +695,8 @@ def main():
             macro[name] = None
             continue
         ysr[name] = df["Close"]
+        if MACRO[name][1] == "G":      # 진단: 24시간 자산의 마지막 3개 봉(날짜·종가)을 로그에 남긴다
+            print("DBG", name, [(str(i), round(float(v), 3)) for i, v in df["Close"].tail(3).items()])
         macro[name], dts[name] = chg(df["Close"])
 
     krw, jpy = drop_partial(hist("KRW=X"), "G"), drop_partial(hist("JPY=X"), "G")
