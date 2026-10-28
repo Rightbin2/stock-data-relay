@@ -1,4 +1,4 @@
-"""fetch_signals.py (v11) - 장 마감 확정 종가 기준 신호 계산
+"""fetch_signals.py (v13) - 장 마감 확정 종가 기준 신호 계산
 daily.json : 매일 읽는 경량 파일 / weekly.json : 토요일 심층 점검용
 지수는 공식·주요 출처의 실제 종가만 사용(ETF 대용·추정 금지), 못 구하면 null + pending 표시
 수량·평단 등 개인 포트폴리오 정보는 포함하지 않음 (공개 저장소용)"""
@@ -566,6 +566,9 @@ def pick_index(name, ysr, ref):
         if s is None or s.empty:
             continue
         s = by_day(s.astype(float).dropna())
+        s = s[[str(i.date()) <= ref for i in s.index]]   # 장중 실행 시 기준일 이후(오늘 진행 중) 값 제외
+        if s.empty:
+            continue
         if y is not None:                       # 교차검증: 이미 확정된 날(최신일 제외)의 값이 야후와 1% 넘게 다르면 기각
             common = s.index.intersection(y.index)
             if len(common) >= 2:
@@ -578,6 +581,8 @@ def pick_index(name, ysr, ref):
         if str(s.index[-1].date()) >= ref:
             return label, s
         print("지수 날짜 부족", name, label, "최신", str(s.index[-1].date()), "필요", ref)
+    if y is not None and len(y):
+        y = y[[str(i.date()) <= ref for i in y.index]]
     if y is not None and len(y) and str(y.index[-1].date()) >= ref:
         return "yahoo", y
     return None, None
