@@ -3,7 +3,7 @@ name: Fetch Stock Data
 on:
   schedule:
     # GitHub 정기 실행은 보통 2~4시간 늦게 시작되므로, 일부러 일찍 시작시키고
-    # 아래 '대기' 단계에서 미국 마감(뉴욕 17:05) 이후까지 기다린 뒤 데이터를 받는다.
+    # 아래 '대기' 단계에서 미국 마감 후 가격이 안정되는 뉴욕 17:45 이후까지 기다린 뒤 데이터를 받는다.
     - cron: '0 18 * * 1-5'   # UTC 월~금 18:00 = KST 화~토 03:00 (메인)
     - cron: '0 20 * * 1-5'   # UTC 월~금 20:00 = KST 화~토 05:00 (백업)
   workflow_dispatch:
@@ -25,7 +25,7 @@ jobs:
 
       - run: pip install -r requirements.txt
 
-      - name: 뉴욕 17:05 이후까지 대기 (정기 실행일 때만)
+      - name: 뉴욕 17:45 이후까지 대기 (정기 실행일 때만)
         if: github.event_name == 'schedule'
         run: |
           python - <<'PY'
@@ -33,7 +33,7 @@ jobs:
           from datetime import datetime
           from zoneinfo import ZoneInfo
           now = datetime.now(ZoneInfo("America/New_York"))
-          target = now.replace(hour=17, minute=5, second=0, microsecond=0)
+          target = now.replace(hour=17, minute=45, second=0, microsecond=0)
           wait = (target - now).total_seconds()
           if 0 < wait < 6 * 3600:
               print("대기", int(wait), "초")
@@ -44,10 +44,6 @@ jobs:
 
       - name: 신호 계산 (daily.json, weekly.json)
         run: python fetch_signals.py
-
-      - name: 구버전 data.json (실패해도 무시)
-        run: python fetch_data.py
-        continue-on-error: true
 
       - name: 저장
         run: |
