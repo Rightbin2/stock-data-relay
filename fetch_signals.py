@@ -1,9 +1,11 @@
-"""fetch_signals.py (v11) - 장 마감 확정 종가 기준 신호 계산
+"""fetch_signals.py (v16) - 장 마감 확정 종가 기준 신호 계산
 daily.json : 매일 읽는 경량 파일 / weekly.json : 토요일 심층 점검용
 지수는 공식·주요 출처의 실제 종가만 사용(ETF 대용·추정 금지), 못 구하면 null + pending 표시
 수량·평단 등 개인 포트폴리오 정보는 포함하지 않음 (공개 저장소용)"""
 import json
 import re
+import warnings
+warnings.filterwarnings("ignore")   # yfinance/pandas 경고로 로그가 길어지는 것 방지
 import sys
 import time
 from datetime import datetime
