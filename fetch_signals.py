@@ -1,4 +1,4 @@
-"""fetch_signals.py (v13) - 장 마감 확정 종가 기준 신호 계산
+"""fetch_signals.py (v11) - 장 마감 확정 종가 기준 신호 계산
 daily.json : 매일 읽는 경량 파일 / weekly.json : 토요일 심층 점검용
 지수는 공식·주요 출처의 실제 종가만 사용(ETF 대용·추정 금지), 못 구하면 null + pending 표시
 수량·평단 등 개인 포트폴리오 정보는 포함하지 않음 (공개 저장소용)"""
@@ -775,6 +775,7 @@ def main():
         "alerts": alerts, "state": state, "rev": rev, "rsi30": rsi30,
         "macro": macro, "idx": idx, "pending": pending, "tsy": ysrc,
         "breadth": probes(), "focus": focus, "missing": missing,
+        "lv": {k: [m["ma20"], m["ma60"], m["lo20p"], m["lo60"], m["d5"], m["d20"], m["g20"], m["rsi"], m["vx"], m["al"]] for k, m in ms.items()},
         "tmon": tmon,
     })
     dump("weekly.json", {
