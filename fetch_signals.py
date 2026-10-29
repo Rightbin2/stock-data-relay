@@ -580,6 +580,7 @@ def pick_index(name, ysr, ref):
                     continue
             if len(common) and common[-1] == s.index[-1] and abs(s[common[-1]] / y[common[-1]] - 1) > 0.01:
                 print("최신일 값이 야후와 다름(공식 출처 채택)", name, label, s.iloc[-1], y[common[-1]])
+                print("DBG", name, label, "공식 최근3", [(str(i.date()), round(v, 2)) for i, v in s.tail(3).items()], "야후 최근3", [(str(i.date()), round(v, 2)) for i, v in y.tail(3).items()])
         if str(s.index[-1].date()) >= ref:
             return label, s
         print("지수 날짜 부족", name, label, "최신", str(s.index[-1].date()), "필요", ref)
