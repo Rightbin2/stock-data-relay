@@ -3,9 +3,11 @@ name: Fetch Stock Data
 on:
   schedule:
     # GitHub 정기 실행은 보통 2~4시간 늦게 시작되므로, 일부러 일찍 시작시키고
-    # 아래 '대기' 단계에서 미국 마감 후 가격이 안정되는 뉴욕 17:45 이후까지 기다린 뒤 데이터를 받는다.
-    - cron: '0 18 * * 1-5'   # UTC 월~금 18:00 = KST 화~토 03:00 (메인)
-    - cron: '0 20 * * 1-5'   # UTC 월~금 20:00 = KST 화~토 05:00 (백업)
+    # 아래 '대기' 단계에서 뉴욕 17:15(24시간 거래 자산 일봉 마감 17:00 직후)까지 기다린 뒤 데이터를 받는다.
+    # 목표: 한국시간 07:30 메일 전에 완료 (서머타임 중 06:15, 겨울 07:15 KST).
+    - cron: '0 17 * * 1-5'   # UTC 월~금 17:00 = KST 화~토 02:00 (1차)
+    - cron: '0 19 * * 1-5'   # UTC 월~금 19:00 = KST 화~토 04:00 (2차)
+    - cron: '0 21 * * 1-5'   # UTC 월~금 21:00 = KST 화~토 06:00 (3차 백업)
   workflow_dispatch:
 
 concurrency:
@@ -15,7 +17,7 @@ concurrency:
 jobs:
   fetch:
     runs-on: ubuntu-latest
-    timeout-minutes: 300
+    timeout-minutes: 450
     steps:
       - uses: actions/checkout@v4
 
@@ -25,7 +27,7 @@ jobs:
 
       - run: pip install -r requirements.txt
 
-      - name: 뉴욕 17:45 이후까지 대기 (정기 실행일 때만)
+      - name: 뉴욕 17:15 이후까지 대기 (정기 실행일 때만)
         if: github.event_name == 'schedule'
         run: |
           python - <<'PY'
@@ -33,9 +35,9 @@ jobs:
           from datetime import datetime
           from zoneinfo import ZoneInfo
           now = datetime.now(ZoneInfo("America/New_York"))
-          target = now.replace(hour=17, minute=45, second=0, microsecond=0)
+          target = now.replace(hour=17, minute=15, second=0, microsecond=0)
           wait = (target - now).total_seconds()
-          if 0 < wait < 6 * 3600:
+          if 0 < wait < 7 * 3600:
               print("대기", int(wait), "초")
               time.sleep(wait)
           else:
