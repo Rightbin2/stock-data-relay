@@ -575,7 +575,7 @@ def pick_index(name, ysr, ref):
             common = s.index.intersection(y.index)
             if len(common) >= 2:
                 d_ = common[-2]
-                if abs(s[d_] / y[d_] - 1) > 0.01:
+                if abs(s[d_] / y[d_] - 1) > (0.02 if name == "닛케이225" else 0.01):   # 야후 ^N225는 공식 종가와 상시 0.5~1.4% 어긋나 닛케이만 2% 허용
                     print("지수 교차검증 불일치", name, label, str(d_.date()), s[d_], y[d_])
                     continue
             if len(common) and common[-1] == s.index[-1] and abs(s[common[-1]] / y[common[-1]] - 1) > 0.01:
