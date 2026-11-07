@@ -660,7 +660,14 @@ def bench():
         sp = drop_partial(hist("^GSPC", period="1y"), "US")
         fx = drop_partial(hist("KRW=X", period="1y"), "G")
         if k is not None and not k.empty:
-            out["KOSPI"] = ref_returns(k["Close"])
+            kc = by_day(k["Close"].dropna())
+            try:  # 야후가 하루 늦을 때 네이버 최신 종가로 뒤를 채운다
+                nv = naver_mobile("KOSPI")
+                if nv is not None and len(kc):
+                    kc = pd.concat([kc, by_day(nv[nv.index > kc.index[-1]])]).sort_index()
+            except Exception as e:
+                print("KOSPI 벤치 보강 실패", e)
+            out["KOSPI"] = ref_returns(kc)
         if sp is not None and not sp.empty:
             out["S&P500_USD"] = ref_returns(sp["Close"])
             if fx is not None and not fx.empty:
