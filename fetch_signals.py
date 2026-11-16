@@ -30,6 +30,7 @@ US = {
     "알파벳": "GOOGL", "IBM": "IBM", "타이슨": "TSN", "테슬라": "TSLA",
     "키사이트": "KEYS", "퀀텀컴": "QUBT", "뉴스케일": "SMR", "로켓랩": "RKLB",
     "인플렉션": "INFQ", "MOO": "MOO", "KORU": "KORU",
+    "엔비디아": "NVDA",
 }
 MACRO = {  # 이름: (티커, 시장)   G = 24시간 자산(뉴욕 17시 기준)
     "USD/KRW": ("KRW=X", "G"), "DXY": ("DX-Y.NYB", "G"), "WTI": ("CL=F", "G"),
