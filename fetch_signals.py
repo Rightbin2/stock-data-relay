@@ -247,6 +247,43 @@ def chg_abs(c):
     return out, str(c.index[-1].date())
 
 
+def par_price_chg(y_prev, y_now, n):
+    """전 기준일에 액면(par, 쿠폰=y_prev)으로 발행된 n년 국채를 y_now로 재평가한 가격 변화(%). 반기 이표, 근사 참고값"""
+    c = y_prev / 2.0
+    r = y_now / 200.0
+    k = int(round(n * 2))
+    if r <= -0.99:
+        return None
+    px = sum(c / (1 + r) ** i for i in range(1, k + 1)) + 100.0 / (1 + r) ** k
+    return round(px - 100.0, 2)
+
+
+def bond_px(ydat):
+    """3·7·10년 금리(%)와 1·5·21일 par 가격 변화(%) → {만기: {y, d1, p1, p5, p21}}"""
+    out = {}
+    for key, n, lab in (("y3", 3, "3Y"), ("y7", 7, "7Y"), ("y10", 10, "10Y")):
+        s = ydat.get(key)
+        if s is None or len(s) < 22:
+            continue
+        s = s.dropna()
+        last = float(s.iloc[-1])
+        row = {"y": rnd(last), "d1": rnd(last - float(s.iloc[-2]))}
+        for tag, k in (("p1", 1), ("p5", 5), ("p21", 21)):
+            row[tag] = par_price_chg(float(s.iloc[-1 - k]), last, n)
+        out[lab] = row
+    return out
+
+
+def fx_pos(s):
+    """환율 시계열 → 52주 고·저·현재 위치(백분위 0~100)"""
+    s = s.dropna()
+    if len(s) < 120:
+        return None
+    last = float(s.iloc[-1])
+    return {"hi": rnd(float(s.max())), "lo": rnd(float(s.min())),
+            "pctl": rnd(float((s <= last).mean() * 100))}
+
+
 UA = {"User-Agent": "Mozilla/5.0 (compatible; stock-data-relay)"}
 TIMEOUT = 10          # 외부 요청 1회 제한(초)
 
@@ -299,6 +336,13 @@ def treasury():
     out = {k: nom[c].dropna().tail(60) for k, c in (("y2", "2 yr"), ("y10", "10 yr"), ("y30", "30 yr"))}
     if len(out["y2"]) < 25 or len(out["y10"]) < 25:
         return None
+    for k, c in (("y3", "3 yr"), ("y7", "7 yr")):   # 선택 항목: 실패해도 기존 동작에 영향 없음
+        try:
+            ex = table("daily_treasury_yield_curve", [c])
+            if ex is not None and len(ex[c].dropna()) >= 25:
+                out[k] = ex[c].dropna().tail(60)
+        except Exception as e:
+            print("재무부", c, "실패", e)
     out["real10"] = None
     try:
         rl = table("daily_treasury_real_yield_curve", ["10 yr"])
@@ -724,6 +768,7 @@ def main():
             s = s / 10
         macro["미국10Y(시장)"], dts["UST10"] = chg_abs(s)
 
+    bondpx = {}
     ydat, ysrc = get_yields()                        # 공식 Daily Treasury Par Yield (재무부 → FRED)
     if ydat is not None:
         y10, y2, y30 = ydat["y10"], ydat["y2"], ydat.get("y30")
@@ -732,6 +777,13 @@ def main():
         if y30 is not None and len(y30) >= 25:
             macro["미국30Y"], _ = chg_abs(y30)
         macro["10Y-2Y"], _ = chg_abs((y10 - y2).dropna())
+        for k_, nm in (("y3", "미국3Y"), ("y7", "미국7Y")):
+            if ydat.get(k_) is not None:
+                macro[nm], _ = chg_abs(ydat[k_])
+        try:
+            bondpx = bond_px(ydat)
+        except Exception as e:
+            print("채권 가격 환산 실패", e)
         if ydat.get("real10") is not None:
             be = (y10 - ydat["real10"]).dropna()
             if len(be) >= 25:
@@ -775,6 +827,15 @@ def main():
              "정배열": sum(1 for m in ms.values() if m["al"] == "정"),
              "역배열": len(rev),
              "RSI≤30": len(rsi30)}
+    fxpos = {}
+    try:
+        k1, j1 = drop_partial(hist("KRW=X", period="1y"), "G"), drop_partial(hist("JPY=X", period="1y"), "G")
+        if k1 is not None:
+            fxpos["USD/KRW"] = fx_pos(by_day(k1["Close"]))
+        if k1 is not None and j1 is not None:
+            fxpos["JPY/KRW"] = fx_pos((by_day(k1["Close"]) / by_day(j1["Close"]) * 100).dropna())
+    except Exception as e:
+        print("환율 52주 위치 실패", e)
     asof = {"KR": ref.get("KR"), "JP": dts.get("닛케이225") or ref.get("JP"), "US": dts.get("S&P500"),
             "FX": dts.get("USD/KRW"), "TSY": dts.get("TSY"), "UST10": dts.get("UST10")}
     idx = {k: [dts.get(k), v] for k, v in idx_src.items()}
@@ -789,7 +850,7 @@ def main():
         "macro": macro, "idx": idx, "pending": pending, "tsy": ysrc,
         "breadth": probes(), "focus": focus, "missing": missing,
         "lv": {k: [m["ma20"], m["ma60"], m["lo20p"], m["lo60"], m["d5"], m["d20"], m["g20"], m["rsi"], m["vx"], m["al"]] for k, m in ms.items()},
-        "tmon": tmon,
+        "tmon": tmon, "bondpx": bondpx, "fxpos": fxpos,
     })
     dump("weekly.json", {
         "gen": gen, "asof": asof, "fields": FIELDS_W,
